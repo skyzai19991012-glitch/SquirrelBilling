@@ -1,3 +1,4 @@
+import { MikrotikService } from '../mikrotik/mikrotik.service';
 import {
   ConflictException,
   Injectable,
@@ -9,8 +10,10 @@ import { UpdateCustomerDto } from './dto/update-customer.dto';
 
 @Injectable()
 export class CustomersService {
-  constructor(private readonly prisma: PrismaService) {}
-
+  constructor(
+  private readonly prisma: PrismaService,
+  private readonly mikrotikService: MikrotikService,
+) {}
   async create(dto: CreateCustomerDto) {
     const router = await this.prisma.router.findUnique({
       where: { id: dto.routerId },
@@ -181,10 +184,10 @@ export class CustomersService {
     });
   }
 
-  async suspend(id: string) {
-    await this.findOne(id);
+   async suspend(id: string) {
+    const customer = await this.findOne(id);
 
-    return this.prisma.customer.update({
+    const updated = await this.prisma.customer.update({
       where: { id },
       data: {
         status: 'SUSPENDED',
@@ -198,12 +201,29 @@ export class CustomersService {
         pppAccount: true,
       },
     });
+
+    let routerSync: any = null;
+
+    if (customer.pppAccount) {
+      routerSync = await this.mikrotikService
+        .disablePppSecret(customer.routerId, customer.pppAccount.username)
+        .catch((error) => ({
+          success: false,
+          message: error.message,
+        }));
+    }
+
+    return {
+      success: true,
+      customer: updated,
+      routerSync,
+    };
   }
 
-  async activate(id: string) {
-    await this.findOne(id);
+    async activate(id: string) {
+    const customer = await this.findOne(id);
 
-    return this.prisma.customer.update({
+    const updated = await this.prisma.customer.update({
       where: { id },
       data: {
         status: 'ACTIVE',
@@ -217,6 +237,23 @@ export class CustomersService {
         pppAccount: true,
       },
     });
+
+    let routerSync: any = null;
+
+    if (customer.pppAccount) {
+      routerSync = await this.mikrotikService
+        .enablePppSecret(customer.routerId, customer.pppAccount.username)
+        .catch((error) => ({
+          success: false,
+          message: error.message,
+        }));
+    }
+
+    return {
+      success: true,
+      customer: updated,
+      routerSync,
+    };
   }
 
   async remove(id: string) {

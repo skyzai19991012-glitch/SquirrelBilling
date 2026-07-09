@@ -489,4 +489,123 @@ export class MikrotikService {
       connection.close();
     }
   }
+    private async findPppSecretId(connection: RouterOsConnection, username: string) {
+    const rows = await connection.talk('/ppp/secret/print', [
+      `?name=${username}`,
+      '=.proplist=.id,name',
+    ]);
+
+    return rows[0]?.['.id'];
+  }
+
+  private async findActiveSessionId(connection: RouterOsConnection, username: string) {
+    const rows = await connection.talk('/ppp/active/print', [
+      `?name=${username}`,
+      '=.proplist=.id,name,address,uptime',
+    ]);
+
+    return rows[0]?.['.id'];
+  }
+
+  async disablePppSecret(routerId: string, username: string) {
+    const connection = await this.connect(routerId);
+
+    try {
+      const secretId = await this.findPppSecretId(connection, username);
+
+      if (!secretId) {
+        throw new NotFoundException('PPP secret not found on MikroTik');
+      }
+
+      await connection.talk('/ppp/secret/set', [
+        `=.id=${secretId}`,
+        '=disabled=yes',
+      ]);
+
+      await this.disconnectPppUser(routerId, username).catch(() => null);
+
+      return {
+        success: true,
+        message: `PPP user ${username} disabled`,
+      };
+    } finally {
+      connection.close();
+    }
+  }
+
+  async enablePppSecret(routerId: string, username: string) {
+    const connection = await this.connect(routerId);
+
+    try {
+      const secretId = await this.findPppSecretId(connection, username);
+
+      if (!secretId) {
+        throw new NotFoundException('PPP secret not found on MikroTik');
+      }
+
+      await connection.talk('/ppp/secret/set', [
+        `=.id=${secretId}`,
+        '=disabled=no',
+      ]);
+
+      return {
+        success: true,
+        message: `PPP user ${username} enabled`,
+      };
+    } finally {
+      connection.close();
+    }
+  }
+
+  async disconnectPppUser(routerId: string, username: string) {
+    const connection = await this.connect(routerId);
+
+    try {
+      const activeId = await this.findActiveSessionId(connection, username);
+
+      if (!activeId) {
+        return {
+          success: true,
+          message: `PPP user ${username} is not online`,
+        };
+      }
+
+      await connection.talk('/ppp/active/remove', [
+        `=.id=${activeId}`,
+      ]);
+
+      return {
+        success: true,
+        message: `PPP user ${username} disconnected`,
+      };
+    } finally {
+      connection.close();
+    }
+  }
+
+  async changePppProfile(routerId: string, username: string, profile: string) {
+    const connection = await this.connect(routerId);
+
+    try {
+      const secretId = await this.findPppSecretId(connection, username);
+
+      if (!secretId) {
+        throw new NotFoundException('PPP secret not found on MikroTik');
+      }
+
+      await connection.talk('/ppp/secret/set', [
+        `=.id=${secretId}`,
+        `=profile=${profile}`,
+      ]);
+
+      await this.disconnectPppUser(routerId, username).catch(() => null);
+
+      return {
+        success: true,
+        message: `PPP user ${username} changed to profile ${profile}`,
+      };
+    } finally {
+      connection.close();
+    }
+  }
 }
