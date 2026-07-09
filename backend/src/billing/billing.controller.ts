@@ -1,13 +1,17 @@
 import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { BillingService } from './billing.service';
+import { BillingAutomationService } from './billing-automation.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 
 @UseGuards(JwtAuthGuard)
 @Controller('billing')
 export class BillingController {
-  constructor(private readonly billingService: BillingService) {}
+  constructor(
+    private readonly billingService: BillingService,
+    private readonly billingAutomationService: BillingAutomationService,
+  ) {}
 
   @Post('invoices')
   createInvoice(@Body() dto: CreateInvoiceDto) {
@@ -37,5 +41,10 @@ export class BillingController {
   @Get('summary')
   summary() {
     return this.billingService.summary();
+  }
+
+  @Post('run-expiry')
+  runExpiryNow() {
+    return this.billingAutomationService.expireDueCustomers();
   }
 }
