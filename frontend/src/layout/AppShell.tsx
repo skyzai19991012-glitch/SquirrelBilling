@@ -1,28 +1,20 @@
+import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
   Activity,
-  Banknote,
-  Boxes,
-  Gauge,
+  Building2,
+  CreditCard,
+  LayoutDashboard,
   LogOut,
   Network,
   Package,
   Router,
   Users,
 } from 'lucide-react';
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import SquirrelLogo from '../components/SquirrelLogo';
-
-const links = [
-  { to: '/', label: 'Command Center', icon: Gauge },
-  { to: '/customers', label: 'Customers', icon: Users },
-  { to: '/packages', label: 'Packages', icon: Package },
-  { to: '/routers', label: 'MikroTik', icon: Router },
-  { to: '/olt', label: 'OLT / ONU', icon: Network },
-  { to: '/billing', label: 'Billing', icon: Banknote },
-];
 
 export default function AppShell() {
   const navigate = useNavigate();
+  const user = JSON.parse(localStorage.getItem('sn_user') || '{}');
 
   const logout = () => {
     localStorage.removeItem('sn_token');
@@ -30,72 +22,112 @@ export default function AppShell() {
     navigate('/login');
   };
 
+  const navClass = ({ isActive }: { isActive: boolean }) =>
+    isActive ? 'nav-link active' : 'nav-link';
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark logo-brand-mark">
-           <SquirrelLogo size={48} compact />
-          </div>
-          <div>
-            <h1>Squirrel</h1>
-            <p>Networks ISP Suite</p>
-          </div>
-        </div>
+        <div>
+          <div className="brand">
+            <div className="logo-brand-mark">
+              <SquirrelLogo size={54} compact />
+            </div>
 
-        <nav className="nav">
-          {links.map((item) => {
-            const Icon = item.icon;
+            <div>
+              <h2>Squirrel</h2>
+              <p>Networks ISP Suite</p>
+            </div>
+          </div>
 
-            return (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.to === '/'}
-                className={({ isActive }) =>
-                  isActive ? 'nav-link active' : 'nav-link'
-                }
-              >
-                <Icon size={19} />
-                <span>{item.label}</span>
+          <nav className="side-nav">
+            <NavLink to="/" end className={navClass}>
+              <LayoutDashboard size={18} />
+              Command Center
+            </NavLink>
+
+            {user?.role === 'SUPER_ADMIN' && (
+              <NavLink to="/tenants" className={navClass}>
+                <Building2 size={18} />
+                Tenants
               </NavLink>
-            );
-          })}
-        </nav>
+            )}
 
-        <div className="sidebar-card">
-          <div className="pulse-dot" />
-          <div>
-            <strong>System Online</strong>
-            <p>Router/OLT test required</p>
-          </div>
+            {user?.role !== 'SUPER_ADMIN' && (
+              <>
+                <NavLink to="/customers" className={navClass}>
+                  <Users size={18} />
+                  Customers
+                </NavLink>
+
+                <NavLink to="/packages" className={navClass}>
+                  <Package size={18} />
+                  Packages
+                </NavLink>
+
+                <NavLink to="/routers" className={navClass}>
+                  <Router size={18} />
+                  MikroTik
+                </NavLink>
+
+                <NavLink to="/olt" className={navClass}>
+                  <Network size={18} />
+                  OLT / ONU
+                </NavLink>
+
+                <NavLink to="/billing" className={navClass}>
+                  <CreditCard size={18} />
+                  Billing
+                </NavLink>
+              </>
+            )}
+          </nav>
         </div>
 
-        <button className="logout" onClick={logout}>
-          <LogOut size={18} />
-          Logout
-        </button>
+        <div className="sidebar-footer">
+          <div className="sidebar-status">
+            <div className="pulse-dot" />
+            <div>
+              <strong>Backend Online</strong>
+              <p>Router/OLT test required</p>
+            </div>
+          </div>
+
+          <button className="logout-btn" onClick={logout}>
+            <LogOut size={17} />
+            Logout
+          </button>
+        </div>
       </aside>
 
-      <main className="main">
+      <main className="main-area">
         <header className="topbar">
           <div>
-            <p className="eyebrow">Live ISP Operations</p>
-            <h2>Squirrel Networks Control Center</h2>
+            <p className="eyebrow">
+              {user?.role === 'SUPER_ADMIN'
+                ? 'SAAS SUPER ADMIN'
+                : 'LIVE ISP OPERATIONS'}
+            </p>
+
+            <h1>
+              {user?.role === 'SUPER_ADMIN'
+                ? 'Squirrel SaaS Control'
+                : 'Squirrel Networks Control Center'}
+            </h1>
           </div>
 
-          <div className="status-pill">
-            <Activity size={17} />
-            Realtime Ready
+          <div className="topbar-pill">
+            <Activity size={18} />
+            <span>
+              {user?.role === 'SUPER_ADMIN'
+                ? 'Super Admin'
+                : user?.tenant?.companyName || user?.tenant?.name || 'Realtime Ready'}
+            </span>
           </div>
         </header>
 
         <Outlet />
       </main>
-
-      <div className="glow glow-one" />
-      <div className="glow glow-two" />
-      <div className="grid-bg" />
     </div>
   );
 }

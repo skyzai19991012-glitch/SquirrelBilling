@@ -1,35 +1,127 @@
 import {
-  ConflictException,
+  BadRequestException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { DeviceConnectionStatus } from '@prisma/client';
 import * as net from 'net';
+import {
+  isSuperAdmin,
+  tenantFilter,
+  tenantIdForCreate,
+} from '../common/tenant-scope';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateOltDto } from './dto/create-olt.dto';
-import { UpdateOltDto } from './dto/update-olt.dto';
-import { CreateOnuDto } from './dto/create-onu.dto';
-import { UpdateOnuDto } from './dto/update-onu.dto';
 
 @Injectable()
 export class OltService {
   constructor(private readonly prisma: PrismaService) {}
 
-  createOlt(dto: CreateOltDto) {
+  private async checkOltLimit(user: any) {
+    if (isSuperAdmin(user)) return;
+
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: user.tenantId },
+    });
+
+    if (!tenant) return;
+
+    const count = await this.prisma.oltDevice.count({
+      where: { tenantId: user.tenantId },
+    });
+
+    if (count >= tenant.maxOlts) {
+      throw new BadRequestException(`OLT limit reached for plan ${tenant.planName}`);
+    }
+  }
+
+  async oltSummary(user: any) {
+    const [
+      totalOlts,
+      activeOlts,
+      connectedOlts,
+      failedOlts,
+      notTestedOlts,
+      totalOnus,
+      onlineOnus,
+      offlineOnus,
+    ] = await Promise.all([
+      this.prisma.oltDevice.count({
+        where: tenantFilter(user),
+      }),
+      this.prisma.oltDevice.count({
+        where: {
+          ...tenantFilter(user),
+          active: true,
+        },
+      }),
+      this.prisma.oltDevice.count({
+        where: {
+          ...tenantFilter(user),
+          connectionStatus: DeviceConnectionStatus.CONNECTED,
+        },
+      }),
+      this.prisma.oltDevice.count({
+        where: {
+          ...tenantFilter(user),
+          connectionStatus: DeviceConnectionStatus.FAILED,
+        },
+      }),
+      this.prisma.oltDevice.count({
+        where: {
+          ...tenantFilter(user),
+          connectionStatus: DeviceConnectionStatus.NOT_TESTED,
+        },
+      }),
+      this.prisma.onuDevice.count({
+        where: tenantFilter(user),
+      }),
+      this.prisma.onuDevice.count({
+        where: {
+          ...tenantFilter(user),
+          online: true,
+        },
+      }),
+      this.prisma.onuDevice.count({
+        where: {
+          ...tenantFilter(user),
+          online: false,
+        },
+      }),
+    ]);
+
+    return {
+      totalOlts,
+      activeOlts,
+      connectedOlts,
+      failedOlts,
+      notTestedOlts,
+      totalOnus,
+      onlineOnus,
+      offlineOnus,
+    };
+  }
+
+  async createOlt(user: any, dto: any) {
+    await this.checkOltLimit(user);
+
     return this.prisma.oltDevice.create({
       data: {
+        tenantId: tenantIdForCreate(user, dto.tenantId),
         name: dto.name,
         vendor: dto.vendor,
         host: dto.host,
-        port: dto.port,
+        port: Number(dto.port || 22),
         username: dto.username,
         password: dto.password,
         active: dto.active ?? true,
+        connectionStatus: DeviceConnectionStatus.NOT_TESTED,
       },
     });
   }
 
-  findAllOlts() {
+  async findAllOlts(user: any) {
     return this.prisma.oltDevice.findMany({
+      where: tenantFilter(user),
       orderBy: { createdAt: 'desc' },
       include: {
         _count: {
@@ -41,11 +133,19 @@ export class OltService {
     });
   }
 
-  async findOlt(id: string) {
-    const olt = await this.prisma.oltDevice.findUnique({
-      where: { id },
+  async findOlt(user: any, id: string) {
+    const olt = await this.prisma.oltDevice.findFirst({
+      where: {
+        id,
+        ...tenantFilter(user),
+      },
       include: {
         onus: true,
+        _count: {
+          select: {
+            onus: true,
+          },
+        },
       },
     });
 
@@ -56,105 +156,79 @@ export class OltService {
     return olt;
   }
 
-  async updateOlt(id: string, dto: UpdateOltDto) {
-    await this.findOlt(id);
+  async updateOlt(user: any, id: string, dto: any) {
+    await this.findOlt(user, id);
 
     return this.prisma.oltDevice.update({
       where: { id },
-      data: dto,
-    });
-  }
-
-  async removeOlt(id: string) {
-    await this.findOlt(id);
-
-    await this.prisma.onuDevice.deleteMany({
-      where: { oltId: id },
-    });
-
-    await this.prisma.oltDevice.delete({
-      where: { id },
-    });
-
-    return {
-      success: true,
-      message: 'OLT deleted successfully',
-    };
-  }
-
-  async testOltConnection(id: string) {
-    const olt = await this.prisma.oltDevice.findUnique({
-      where: { id },
-    });
-
-    if (!olt) {
-      throw new NotFoundException('OLT not found');
-    }
-
-    const result = await new Promise<{ success: boolean; message: string }>(
-      (resolve) => {
-        const socket = new net.Socket();
-
-        const done = (success: boolean, message: string) => {
-          socket.destroy();
-          resolve({ success, message });
-        };
-
-        socket.setTimeout(5000);
-
-        socket.once('connect', () => {
-          done(true, `Connected to OLT at ${olt.host}:${olt.port}`);
-        });
-
-        socket.once('timeout', () => {
-          done(false, `Connection timeout to ${olt.host}:${olt.port}`);
-        });
-
-        socket.once('error', (error) => {
-          done(false, error.message);
-        });
-
-        socket.connect(olt.port, olt.host);
-      },
-    );
-
-    await this.prisma.oltDevice.update({
-      where: { id },
       data: {
-        active: result.success,
+        name: dto.name,
+        vendor: dto.vendor,
+        host: dto.host,
+        port: dto.port !== undefined ? Number(dto.port) : undefined,
+        username: dto.username,
+        password: dto.password,
+        active: dto.active,
+        connectionStatus: DeviceConnectionStatus.NOT_TESTED,
+        lastTestedAt: null,
+        lastError: null,
+      },
+    });
+  }
+
+  async removeOlt(user: any, id: string) {
+    await this.findOlt(user, id);
+
+    const onuCount = await this.prisma.onuDevice.count({
+      where: {
+        oltId: id,
+        ...tenantFilter(user),
       },
     });
 
-    return result;
+    if (onuCount > 0) {
+      throw new BadRequestException('Cannot delete OLT with ONU devices');
+    }
+
+    return this.prisma.oltDevice.delete({
+      where: { id },
+    });
   }
 
-  async createOnu(dto: CreateOnuDto) {
-    const olt = await this.prisma.oltDevice.findUnique({
-      where: { id: dto.oltId },
+  async createOnu(user: any, dto: any) {
+    const tenantId = tenantIdForCreate(user, dto.tenantId);
+
+    const olt = await this.prisma.oltDevice.findFirst({
+      where: {
+        id: dto.oltId,
+        ...(tenantId ? { tenantId } : {}),
+      },
     });
 
     if (!olt) {
-      throw new NotFoundException('OLT not found');
-    }
-
-    const existing = await this.prisma.onuDevice.findUnique({
-      where: { serialNumber: dto.serialNumber },
-    });
-
-    if (existing) {
-      throw new ConflictException('ONU serial number already exists');
+      throw new BadRequestException('OLT not found for this tenant');
     }
 
     return this.prisma.onuDevice.create({
       data: {
+        tenantId,
         oltId: dto.oltId,
         serialNumber: dto.serialNumber,
         ponPort: dto.ponPort,
         onuId: dto.onuId,
-        vlan: dto.vlan,
-        rxPower: dto.rxPower,
-        txPower: dto.txPower,
-        distance: dto.distance,
+        vlan: dto.vlan !== undefined && dto.vlan !== '' ? Number(dto.vlan) : undefined,
+        rxPower:
+          dto.rxPower !== undefined && dto.rxPower !== ''
+            ? Number(dto.rxPower)
+            : undefined,
+        txPower:
+          dto.txPower !== undefined && dto.txPower !== ''
+            ? Number(dto.txPower)
+            : undefined,
+        distance:
+          dto.distance !== undefined && dto.distance !== ''
+            ? Number(dto.distance)
+            : undefined,
         online: dto.online ?? false,
         customerName: dto.customerName,
         customerPhone: dto.customerPhone,
@@ -165,8 +239,9 @@ export class OltService {
     });
   }
 
-  findAllOnus() {
+  async findAllOnus(user: any) {
     return this.prisma.onuDevice.findMany({
+      where: tenantFilter(user),
       orderBy: { createdAt: 'desc' },
       include: {
         olt: true,
@@ -174,18 +249,12 @@ export class OltService {
     });
   }
 
-  async findOnusByOlt(oltId: string) {
-    await this.findOlt(oltId);
-
-    return this.prisma.onuDevice.findMany({
-      where: { oltId },
-      orderBy: { createdAt: 'desc' },
-    });
-  }
-
-  async findOnu(id: string) {
-    const onu = await this.prisma.onuDevice.findUnique({
-      where: { id },
+  async findOnu(user: any, id: string) {
+    const onu = await this.prisma.onuDevice.findFirst({
+      where: {
+        id,
+        ...tenantFilter(user),
+      },
       include: {
         olt: true,
       },
@@ -198,49 +267,118 @@ export class OltService {
     return onu;
   }
 
-  async updateOnu(id: string, dto: UpdateOnuDto) {
-    await this.findOnu(id);
+  async updateOnu(user: any, id: string, dto: any) {
+    await this.findOnu(user, id);
 
     return this.prisma.onuDevice.update({
       where: { id },
-      data: dto,
+      data: {
+        serialNumber: dto.serialNumber,
+        ponPort: dto.ponPort,
+        onuId: dto.onuId,
+        vlan: dto.vlan !== undefined && dto.vlan !== '' ? Number(dto.vlan) : undefined,
+        rxPower:
+          dto.rxPower !== undefined && dto.rxPower !== ''
+            ? Number(dto.rxPower)
+            : undefined,
+        txPower:
+          dto.txPower !== undefined && dto.txPower !== ''
+            ? Number(dto.txPower)
+            : undefined,
+        distance:
+          dto.distance !== undefined && dto.distance !== ''
+            ? Number(dto.distance)
+            : undefined,
+        online: dto.online,
+        customerName: dto.customerName,
+        customerPhone: dto.customerPhone,
+      },
       include: {
         olt: true,
       },
     });
   }
 
-  async removeOnu(id: string) {
-    await this.findOnu(id);
+  async removeOnu(user: any, id: string) {
+    await this.findOnu(user, id);
 
-    await this.prisma.onuDevice.delete({
+    return this.prisma.onuDevice.delete({
       where: { id },
     });
-
-    return {
-      success: true,
-      message: 'ONU deleted successfully',
-    };
   }
 
-  async oltSummary() {
-    const totalOlts = await this.prisma.oltDevice.count();
-    const activeOlts = await this.prisma.oltDevice.count({
-      where: { active: true },
-    });
+  async findOnusByOlt(user: any, id: string) {
+    await this.findOlt(user, id);
 
-    const totalOnus = await this.prisma.onuDevice.count();
-    const onlineOnus = await this.prisma.onuDevice.count({
-      where: { online: true },
+    return this.prisma.onuDevice.findMany({
+      where: {
+        oltId: id,
+        ...tenantFilter(user),
+      },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        olt: true,
+      },
     });
+  }
 
-    return {
-      totalOlts,
-      activeOlts,
-      inactiveOlts: totalOlts - activeOlts,
-      totalOnus,
-      onlineOnus,
-      offlineOnus: totalOnus - onlineOnus,
-    };
+  private testTcpConnection(host: string, port: number, timeout = 8000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const socket = new net.Socket();
+
+      const done = (error?: Error) => {
+        socket.removeAllListeners();
+        socket.destroy();
+
+        if (error) reject(error);
+        else resolve();
+      };
+
+      socket.setTimeout(timeout);
+
+      socket.once('connect', () => done());
+      socket.once('timeout', () => done(new Error('Connection timeout')));
+      socket.once('error', (error) => done(error));
+
+      socket.connect(port, host);
+    });
+  }
+
+  async testOltConnection(user: any, id: string) {
+    const olt = await this.findOlt(user, id);
+
+    try {
+      await this.testTcpConnection(olt.host, olt.port);
+
+      const updated = await this.prisma.oltDevice.update({
+        where: { id },
+        data: {
+          connectionStatus: DeviceConnectionStatus.CONNECTED,
+          lastTestedAt: new Date(),
+          lastError: null,
+        },
+      });
+
+      return {
+        success: true,
+        message: 'OLT port is reachable',
+        olt: updated,
+      };
+    } catch (error: any) {
+      const updated = await this.prisma.oltDevice.update({
+        where: { id },
+        data: {
+          connectionStatus: DeviceConnectionStatus.FAILED,
+          lastTestedAt: new Date(),
+          lastError: error?.message || 'OLT connection failed',
+        },
+      });
+
+      return {
+        success: false,
+        message: error?.message || 'OLT connection failed',
+        olt: updated,
+      };
+    }
   }
 }

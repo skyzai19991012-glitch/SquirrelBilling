@@ -3,42 +3,108 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { InvoiceStatus, PaymentMethod, type Invoice } from '@prisma/client';
+import { CustomerStatus, InvoiceStatus, PaymentMethod } from '@prisma/client';
+import { tenantFilter, tenantIdForCreate } from '../common/tenant-scope';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateInvoiceDto } from './dto/create-invoice.dto';
-import { CreatePaymentDto } from './dto/create-payment.dto';
 
 @Injectable()
 export class BillingService {
   constructor(private readonly prisma: PrismaService) {}
 
   private generateInvoiceNo() {
-    const now = new Date();
-    return `INV-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}-${Date.now()}`;
+    return `INV-${Date.now()}`;
   }
 
-  async createInvoice(dto: CreateInvoiceDto) {
-    const customer = await this.prisma.customer.findUnique({
-      where: { id: dto.customerId },
+  private normalizeMethod(method: string): PaymentMethod {
+    if (method === 'BANK_TRANSFER') return PaymentMethod.BANK;
+    if (method && Object.values(PaymentMethod).includes(method as PaymentMethod)) {
+      return method as PaymentMethod;
+    }
+
+    return PaymentMethod.CASH;
+  }
+
+  private async recalcInvoice(invoiceId: string) {
+    const invoice = await this.prisma.invoice.findUnique({
+      where: { id: invoiceId },
+    });
+
+    if (!invoice) return null;
+
+    const payments = await this.prisma.payment.aggregate({
+      where: { invoiceId },
+      _sum: { amount: true },
+    });
+
+    const paidAmount = payments._sum.amount || 0;
+    const balance = Math.max(Number(invoice.amount) - paidAmount, 0);
+
+    let status: InvoiceStatus = InvoiceStatus.PENDING;
+
+    if (paidAmount >= invoice.amount) {
+      status = InvoiceStatus.PAID;
+    } else if (paidAmount > 0) {
+      status = InvoiceStatus.PARTIAL;
+    } else if (invoice.dueDate < new Date()) {
+      status = InvoiceStatus.OVERDUE;
+    }
+
+    return this.prisma.invoice.update({
+      where: { id: invoiceId },
+      data: {
+        paidAmount,
+        balance,
+        status,
+      },
+    });
+  }
+
+  async findInvoices(user: any) {
+    return this.prisma.invoice.findMany({
+      where: tenantFilter(user),
+      orderBy: { createdAt: 'desc' },
+      include: {
+        customer: {
+          include: {
+            router: true,
+            package: true,
+            pppAccount: true,
+          },
+        },
+        payments: true,
+      },
+    });
+  }
+
+  async createInvoice(user: any, dto: any) {
+    const tenantId = tenantIdForCreate(user, dto.tenantId);
+
+    const customer = await this.prisma.customer.findFirst({
+      where: {
+        id: dto.customerId,
+        ...(tenantId ? { tenantId } : {}),
+      },
     });
 
     if (!customer) {
-      throw new NotFoundException('Customer not found');
+      throw new BadRequestException('Customer not found for this tenant');
     }
 
+    const amount = Number(dto.amount);
     const dueDate = dto.dueDate
       ? new Date(dto.dueDate)
-      : customer.dueDate || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
     return this.prisma.invoice.create({
       data: {
-        invoiceNo: this.generateInvoiceNo(),
+        tenantId,
+        invoiceNo: dto.invoiceNo || this.generateInvoiceNo(),
         customerId: dto.customerId,
-        amount: dto.amount,
+        amount,
         paidAmount: 0,
-        balance: dto.amount,
-        dueDate,
+        balance: amount,
         status: InvoiceStatus.PENDING,
+        dueDate,
       },
       include: {
         customer: true,
@@ -46,22 +112,11 @@ export class BillingService {
     });
   }
 
-  findInvoices() {
-    return this.prisma.invoice.findMany({
-      orderBy: { createdAt: 'desc' },
-      include: {
-        customer: true,
-        payments: true,
-      },
-    });
-  }
-
-  async findInvoice(id: string) {
-    const invoice = await this.prisma.invoice.findUnique({
-      where: { id },
-      include: {
-        customer: true,
-        payments: true,
+    async updateInvoice(user: any, id: string, dto: any) {
+    const invoice = await this.prisma.invoice.findFirst({
+      where: {
+        id,
+        ...tenantFilter(user),
       },
     });
 
@@ -69,95 +124,52 @@ export class BillingService {
       throw new NotFoundException('Invoice not found');
     }
 
-    return invoice;
-  }
-
-  async recordPayment(dto: CreatePaymentDto) {
-    const customer = await this.prisma.customer.findUnique({
-      where: { id: dto.customerId },
-    });
-
-    if (!customer) {
-      throw new NotFoundException('Customer not found');
-    }
-
-    let invoice: Invoice | null = null;
-
-    if (dto.invoiceId) {
-      invoice = await this.prisma.invoice.findUnique({
-        where: { id: dto.invoiceId },
-      });
-
-      if (!invoice) {
-        throw new NotFoundException('Invoice not found');
-      }
-
-      if (invoice.customerId !== dto.customerId) {
-        throw new BadRequestException('Invoice does not belong to this customer');
-      }
-    }
-
-    const payment = await this.prisma.payment.create({
+    const updated = await this.prisma.invoice.update({
+      where: { id },
       data: {
-        customerId: dto.customerId,
-        invoiceId: dto.invoiceId,
-        amount: dto.amount,
-        method: dto.method || PaymentMethod.CASH,
-        reference: dto.reference,
-        notes: dto.notes,
+        amount: dto.amount !== undefined ? Number(dto.amount) : undefined,
+        dueDate: dto.dueDate ? new Date(dto.dueDate) : undefined,
+        status: dto.status,
       },
     });
 
-    if (invoice) {
-      const paidAmount = invoice.paidAmount + dto.amount;
-      const balance = Math.max(invoice.amount - paidAmount, 0);
+    await this.recalcInvoice(id);
 
-      await this.prisma.invoice.update({
-        where: { id: invoice.id },
-        data: {
-          paidAmount,
-          balance,
-          status:
-            balance <= 0
-              ? InvoiceStatus.PAID
-              : paidAmount > 0
-                ? InvoiceStatus.PARTIAL
-                : InvoiceStatus.PENDING,
-        },
-      });
+    return updated;
+  }
+
+  async deleteInvoice(user: any, id: string) {
+    const invoice = await this.prisma.invoice.findFirst({
+      where: {
+        id,
+        ...tenantFilter(user),
+      },
+    });
+
+    if (!invoice) {
+      throw new NotFoundException('Invoice not found');
     }
 
-    if (dto.extendDays) {
-      const baseDate =
-        customer.dueDate && customer.dueDate > new Date()
-          ? customer.dueDate
-          : new Date();
+    await this.prisma.payment.deleteMany({
+      where: {
+        invoiceId: id,
+        ...tenantFilter(user),
+      },
+    });
 
-      const newDueDate = new Date(baseDate);
-      newDueDate.setDate(newDueDate.getDate() + dto.extendDays);
-
-      await this.prisma.customer.update({
-        where: { id: customer.id },
-        data: {
-          dueDate: newDueDate,
-          status: 'ACTIVE',
-          pppAccount: {
-            update: {
-              disabled: false,
-            },
-          },
-        },
-      });
-    }
+    await this.prisma.invoice.delete({
+      where: { id },
+    });
 
     return {
       success: true,
-      payment,
+      message: 'Invoice deleted',
     };
   }
 
-  findPayments() {
+  async findPayments(user: any) {
     return this.prisma.payment.findMany({
+      where: tenantFilter(user),
       orderBy: { createdAt: 'desc' },
       include: {
         customer: true,
@@ -166,7 +178,112 @@ export class BillingService {
     });
   }
 
-  async summary() {
+  async createPayment(user: any, dto: any) {
+    const tenantId = tenantIdForCreate(user, dto.tenantId);
+
+    const customer = await this.prisma.customer.findFirst({
+      where: {
+        id: dto.customerId,
+        ...(tenantId ? { tenantId } : {}),
+      },
+    });
+
+    if (!customer) {
+      throw new BadRequestException('Customer not found for this tenant');
+    }
+
+    if (dto.invoiceId) {
+      const invoice = await this.prisma.invoice.findFirst({
+        where: {
+          id: dto.invoiceId,
+          ...(tenantId ? { tenantId } : {}),
+        },
+      });
+
+      if (!invoice) {
+        throw new BadRequestException('Invoice not found for this tenant');
+      }
+    }
+
+    const payment = await this.prisma.payment.create({
+      data: {
+        tenantId,
+        customerId: dto.customerId,
+        invoiceId: dto.invoiceId || undefined,
+        amount: Number(dto.amount),
+        method: this.normalizeMethod(dto.method),
+        reference: dto.reference || dto.referenceNo,
+        notes: dto.notes,
+      },
+      include: {
+        customer: true,
+        invoice: true,
+      },
+    });
+
+    if (dto.invoiceId) {
+      await this.recalcInvoice(dto.invoiceId);
+    }
+
+    return payment;
+  }
+
+    async updatePayment(user: any, id: string, dto: any) {
+    const payment = await this.prisma.payment.findFirst({
+      where: {
+        id,
+        ...tenantFilter(user),
+      },
+    });
+
+    if (!payment) {
+      throw new NotFoundException('Payment not found');
+    }
+
+    const updated = await this.prisma.payment.update({
+      where: { id },
+      data: {
+        amount: dto.amount !== undefined ? Number(dto.amount) : undefined,
+        method: dto.method ? this.normalizeMethod(dto.method) : undefined,
+        reference: dto.reference || dto.referenceNo,
+        notes: dto.notes,
+      },
+    });
+
+    if (payment.invoiceId) {
+      await this.recalcInvoice(payment.invoiceId);
+    }
+
+    return updated;
+  }
+
+  async deletePayment(user: any, id: string) {
+    const payment = await this.prisma.payment.findFirst({
+      where: {
+        id,
+        ...tenantFilter(user),
+      },
+    });
+
+    if (!payment) {
+      throw new NotFoundException('Payment not found');
+    }
+
+    await this.prisma.payment.delete({
+      where: { id },
+    });
+
+    if (payment.invoiceId) {
+      await this.recalcInvoice(payment.invoiceId);
+    }
+
+    return {
+      success: true,
+      message: 'Payment deleted',
+    };
+  }
+
+  async summary(user: any) {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
@@ -174,55 +291,77 @@ export class BillingService {
     monthStart.setDate(1);
     monthStart.setHours(0, 0, 0, 0);
 
-    const todayPayments = await this.prisma.payment.aggregate({
-      where: {
-        createdAt: {
-          gte: todayStart,
+    const [todayCollection, monthlyCollection, outstanding] = await Promise.all([
+      this.prisma.payment.aggregate({
+        where: {
+          ...tenantFilter(user),
+          createdAt: { gte: todayStart },
         },
-      },
-      _sum: {
-        amount: true,
-      },
-    });
-
-    const monthlyPayments = await this.prisma.payment.aggregate({
-      where: {
-        createdAt: {
-          gte: monthStart,
+        _sum: { amount: true },
+      }),
+      this.prisma.payment.aggregate({
+        where: {
+          ...tenantFilter(user),
+          createdAt: { gte: monthStart },
         },
-      },
-      _sum: {
-        amount: true,
-      },
-    });
-
-    const outstanding = await this.prisma.invoice.aggregate({
-      where: {
-        status: {
-          in: [InvoiceStatus.PENDING, InvoiceStatus.PARTIAL, InvoiceStatus.OVERDUE],
+        _sum: { amount: true },
+      }),
+      this.prisma.invoice.aggregate({
+        where: {
+          ...tenantFilter(user),
+          status: {
+            in: [InvoiceStatus.PENDING, InvoiceStatus.PARTIAL, InvoiceStatus.OVERDUE],
+          },
         },
-      },
-      _sum: {
-        balance: true,
-      },
-    });
-
-    const overdueCount = await this.prisma.invoice.count({
-      where: {
-        dueDate: {
-          lt: new Date(),
-        },
-        status: {
-          in: [InvoiceStatus.PENDING, InvoiceStatus.PARTIAL],
-        },
-      },
-    });
+        _sum: { balance: true },
+      }),
+    ]);
 
     return {
-      todayCollection: todayPayments._sum.amount || 0,
-      monthlyCollection: monthlyPayments._sum.amount || 0,
+      todayCollection: todayCollection._sum.amount || 0,
+      monthlyCollection: monthlyCollection._sum.amount || 0,
       outstanding: outstanding._sum.balance || 0,
-      overdueInvoices: overdueCount,
     };
+  }
+
+  async runExpiry(user: any) {
+    const expired = await this.prisma.customer.findMany({
+      where: {
+        ...tenantFilter(user),
+        status: CustomerStatus.ACTIVE,
+        dueDate: {
+          lte: new Date(),
+        },
+      },
+    });
+
+    for (const customer of expired) {
+      await this.prisma.customer.update({
+        where: { id: customer.id },
+        data: { status: CustomerStatus.EXPIRED },
+      });
+
+      await this.prisma.pppAccount.updateMany({
+        where: {
+          customerId: customer.id,
+          tenantId: customer.tenantId,
+        },
+        data: {
+          disabled: true,
+        },
+      });
+    }
+
+    return {
+      success: true,
+      expiredCount: expired.length,
+    };
+  }
+
+  async expireDueCustomers() {
+    return this.runExpiry({
+      role: 'SUPER_ADMIN',
+      tenantId: null,
+    });
   }
 }

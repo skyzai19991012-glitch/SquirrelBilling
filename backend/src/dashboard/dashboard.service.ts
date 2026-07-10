@@ -1,12 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { CustomerStatus, InvoiceStatus } from '@prisma/client';
+import { tenantFilter } from '../common/tenant-scope';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class DashboardService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async summary() {
+  async summary(user: any) {
+    const filter = tenantFilter(user);
+
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
@@ -15,194 +18,121 @@ export class DashboardService {
     monthStart.setHours(0, 0, 0, 0);
 
     const [
-      totalCustomers,
-      activeCustomers,
-      suspendedCustomers,
-      expiredCustomers,
-      totalRouters,
-      activeRouters,
-      totalPackages,
-      activePackages,
+      customersTotal,
+      customersActive,
+      customersSuspended,
+      customersExpired,
+      routersTotal,
+      routersActive,
+      packagesTotal,
+      invoicesPending,
+      todayCollection,
+      monthlyCollection,
+      outstanding,
       totalOlts,
       activeOlts,
       totalOnus,
       onlineOnus,
-      pendingInvoices,
-      overdueInvoices,
-      todayPayments,
-      monthlyPayments,
-      outstandingInvoices,
     ] = await Promise.all([
-      this.prisma.customer.count(),
-
+      this.prisma.customer.count({ where: filter }),
       this.prisma.customer.count({
-        where: { status: CustomerStatus.ACTIVE },
+        where: { ...filter, status: CustomerStatus.ACTIVE },
       }),
-
       this.prisma.customer.count({
-        where: { status: CustomerStatus.SUSPENDED },
+        where: { ...filter, status: CustomerStatus.SUSPENDED },
       }),
-
       this.prisma.customer.count({
-        where: { status: CustomerStatus.EXPIRED },
+        where: { ...filter, status: CustomerStatus.EXPIRED },
       }),
-
-      this.prisma.router.count(),
-
-      this.prisma.router.count({
-        where: { active: true },
-      }),
-
-      this.prisma.internetPackage.count(),
-
-      this.prisma.internetPackage.count({
-        where: { active: true },
-      }),
-
-      this.prisma.oltDevice.count(),
-
-      this.prisma.oltDevice.count({
-        where: { active: true },
-      }),
-
-      this.prisma.onuDevice.count(),
-
-      this.prisma.onuDevice.count({
-        where: { online: true },
-      }),
-
+      this.prisma.router.count({ where: filter }),
+      this.prisma.router.count({ where: { ...filter, active: true } }),
+      this.prisma.internetPackage.count({ where: filter }),
       this.prisma.invoice.count({
         where: {
+          ...filter,
           status: {
-            in: [InvoiceStatus.PENDING, InvoiceStatus.PARTIAL],
+            in: [InvoiceStatus.PENDING, InvoiceStatus.PARTIAL, InvoiceStatus.OVERDUE],
           },
         },
       }),
-
-      this.prisma.invoice.count({
-        where: {
-          dueDate: {
-            lt: new Date(),
-          },
-          status: {
-            in: [InvoiceStatus.PENDING, InvoiceStatus.PARTIAL],
-          },
-        },
-      }),
-
       this.prisma.payment.aggregate({
         where: {
-          createdAt: {
-            gte: todayStart,
-          },
+          ...filter,
+          createdAt: { gte: todayStart },
         },
-        _sum: {
-          amount: true,
-        },
+        _sum: { amount: true },
       }),
-
       this.prisma.payment.aggregate({
         where: {
-          createdAt: {
-            gte: monthStart,
-          },
+          ...filter,
+          createdAt: { gte: monthStart },
         },
-        _sum: {
-          amount: true,
-        },
+        _sum: { amount: true },
       }),
-
       this.prisma.invoice.aggregate({
         where: {
+          ...filter,
           status: {
-            in: [
-              InvoiceStatus.PENDING,
-              InvoiceStatus.PARTIAL,
-              InvoiceStatus.OVERDUE,
-            ],
+            in: [InvoiceStatus.PENDING, InvoiceStatus.PARTIAL, InvoiceStatus.OVERDUE],
           },
         },
-        _sum: {
-          balance: true,
-        },
+        _sum: { balance: true },
       }),
+      this.prisma.oltDevice.count({ where: filter }),
+      this.prisma.oltDevice.count({ where: { ...filter, active: true } }),
+      this.prisma.onuDevice.count({ where: filter }),
+      this.prisma.onuDevice.count({ where: { ...filter, online: true } }),
     ]);
 
     return {
       customers: {
-        total: totalCustomers,
-        active: activeCustomers,
-        suspended: suspendedCustomers,
-        expired: expiredCustomers,
+        total: customersTotal,
+        active: customersActive,
+        suspended: customersSuspended,
+        expired: customersExpired,
       },
       routers: {
-        total: totalRouters,
-        active: activeRouters,
-        inactive: totalRouters - activeRouters,
+        total: routersTotal,
+        active: routersActive,
       },
       packages: {
-        total: totalPackages,
-        active: activePackages,
+        total: packagesTotal,
+      },
+      billing: {
+        pendingInvoices: invoicesPending,
+        todayCollection: todayCollection._sum.amount || 0,
+        monthlyCollection: monthlyCollection._sum.amount || 0,
+        outstanding: outstanding._sum.balance || 0,
       },
       olt: {
         totalOlts,
         activeOlts,
-        inactiveOlts: totalOlts - activeOlts,
         totalOnus,
         onlineOnus,
-        offlineOnus: totalOnus - onlineOnus,
-      },
-      billing: {
-        pendingInvoices,
-        overdueInvoices,
-        todayCollection: todayPayments._sum.amount || 0,
-        monthlyCollection: monthlyPayments._sum.amount || 0,
-        outstanding: outstandingInvoices._sum.balance || 0,
       },
     };
   }
 
-  async recentPayments() {
+  async recentPayments(user: any) {
     return this.prisma.payment.findMany({
-      take: 10,
-      orderBy: {
-        createdAt: 'desc',
-      },
+      where: tenantFilter(user),
+      orderBy: { createdAt: 'desc' },
+      take: 8,
       include: {
-        customer: {
-          select: {
-            id: true,
-            customerNo: true,
-            fullName: true,
-            phone: true,
-          },
-        },
-        invoice: {
-          select: {
-            id: true,
-            invoiceNo: true,
-            status: true,
-          },
-        },
+        customer: true,
+        invoice: true,
       },
     });
   }
 
-  async recentCustomers() {
+  async recentCustomers(user: any) {
     return this.prisma.customer.findMany({
-      take: 10,
-      orderBy: {
-        createdAt: 'desc',
-      },
+      where: tenantFilter(user),
+      orderBy: { createdAt: 'desc' },
+      take: 8,
       include: {
+        router: true,
         package: true,
-        router: {
-          select: {
-            id: true,
-            name: true,
-            host: true,
-          },
-        },
         pppAccount: true,
       },
     });

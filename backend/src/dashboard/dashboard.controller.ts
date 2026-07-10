@@ -1,4 +1,5 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
+import { CurrentUser } from '../auth/current-user.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { DashboardService } from './dashboard.service';
 
@@ -8,17 +9,17 @@ export class DashboardController {
   constructor(private readonly dashboardService: DashboardService) {}
 
   @Get('summary')
-  summary() {
-    return this.dashboardService.summary();
+  summary(@CurrentUser() user: any) {
+    return this.dashboardService.summary(user);
   }
 
   @Get('recent-payments')
-  recentPayments() {
-    return this.dashboardService.recentPayments();
+  recentPayments(@CurrentUser() user: any) {
+    return this.dashboardService.recentPayments(user);
   }
 
   @Get('recent-customers')
-  recentCustomers() {
-    return this.dashboardService.recentCustomers();
+  recentCustomers(@CurrentUser() user: any) {
+    return this.dashboardService.recentCustomers(user);
   }
 }

@@ -1,63 +1,105 @@
-import { FormEvent, useMemo, useState } from 'react';
+﻿import { useState } from 'react';
+import type { FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Banknote,
-  CalendarClock,
   CreditCard,
+  Edit3,
   FileText,
-  PlayCircle,
-  Receipt,
+  Plus,
+  ReceiptText,
+  Save,
+  Trash2,
+  X,
+  Zap,
 } from 'lucide-react';
 import { api } from '../api/client';
-import type { CustomerItem, InvoiceItem, PaymentItem } from '../types';
+
+type CustomerItem = {
+  id: string;
+  customerNo: string;
+  fullName: string;
+  phone: string;
+  package?: {
+    id: string;
+    name: string;
+    price: number;
+  };
+};
+
+type InvoiceItem = {
+  id: string;
+  invoiceNo: string;
+  customerId: string;
+  amount: number;
+  paidAmount: number;
+  balance: number;
+  status: 'DRAFT' | 'PENDING' | 'PAID' | 'PARTIAL' | 'OVERDUE' | 'CANCELLED';
+  issueDate: string;
+  dueDate: string;
+  customer?: CustomerItem;
+};
+
+type PaymentItem = {
+  id: string;
+  customerId: string;
+  invoiceId?: string | null;
+  amount: number;
+  method: 'CASH' | 'JAZZCASH' | 'EASYPAISA' | 'BANK' | 'CARD' | 'OTHER';
+  reference?: string | null;
+  notes?: string | null;
+  createdAt: string;
+  customer?: CustomerItem;
+  invoice?: InvoiceItem | null;
+};
+
+type BillingSummary = {
+  totalInvoices?: number;
+  pendingInvoices?: number;
+  paidInvoices?: number;
+  overdueInvoices?: number;
+  totalBilled?: number;
+  totalPaid?: number;
+  totalOutstanding?: number;
+  todayCollection?: number;
+  monthlyCollection?: number;
+  outstanding?: number;
+};
+
+const emptyInvoiceForm = {
+  customerId: '',
+  amount: 0,
+  dueDate: '',
+  status: 'PENDING',
+};
+
+const emptyPaymentForm = {
+  customerId: '',
+  invoiceId: '',
+  amount: 0,
+  method: 'CASH',
+  reference: '',
+  notes: '',
+};
 
 function money(value?: number) {
   return `Rs. ${Number(value || 0).toLocaleString()}`;
 }
 
-function BillingCard({
-  title,
-  value,
-  sub,
-  icon: Icon,
-}: {
-  title: string;
-  value: string | number;
-  sub: string;
-  icon: any;
-}) {
-  return (
-    <div className="stat-card">
-      <div className="stat-icon">
-        <Icon size={23} />
-      </div>
-      <div>
-        <p>{title}</p>
-        <h3>{value}</h3>
-        <span>{sub}</span>
-      </div>
-    </div>
-  );
+function badgeClass(status?: string) {
+  if (status === 'PAID') return 'badge green';
+  if (status === 'PARTIAL' || status === 'PENDING') return 'badge orange';
+  if (status === 'OVERDUE' || status === 'CANCELLED') return 'badge red';
+  return 'badge orange';
 }
 
 export default function Billing() {
   const queryClient = useQueryClient();
 
-  const [invoiceForm, setInvoiceForm] = useState({
-    customerId: '',
-    amount: 0,
-    dueDate: '',
-    notes: '',
-  });
+  const [invoiceEditingId, setInvoiceEditingId] = useState<string | null>(null);
+  const [paymentEditingId, setPaymentEditingId] = useState<string | null>(null);
 
-  const [paymentForm, setPaymentForm] = useState({
-    customerId: '',
-    invoiceId: '',
-    amount: 0,
-    method: 'CASH',
-    referenceNo: '',
-    notes: '',
-  });
+  const [invoiceForm, setInvoiceForm] = useState(emptyInvoiceForm);
+  const [paymentForm, setPaymentForm] = useState(emptyPaymentForm);
 
   const { data: customers = [] } = useQuery<CustomerItem[]>({
     queryKey: ['customers'],
@@ -83,7 +125,7 @@ export default function Billing() {
     },
   });
 
-  const { data: summary } = useQuery({
+  const { data: summary } = useQuery<BillingSummary>({
     queryKey: ['billing-summary'],
     queryFn: async () => {
       const res = await api.get('/billing/summary');
@@ -91,81 +133,97 @@ export default function Billing() {
     },
   });
 
-  const selectedCustomer = useMemo(
-    () => customers.find((customer) => customer.id === invoiceForm.customerId),
-    [customers, invoiceForm.customerId],
-  );
-
-  const selectedPaymentCustomer = useMemo(
-    () => customers.find((customer) => customer.id === paymentForm.customerId),
-    [customers, paymentForm.customerId],
-  );
-
-  const customerInvoices = useMemo(
-    () =>
-      invoices.filter(
-        (invoice) =>
-          invoice.customerId === paymentForm.customerId &&
-          invoice.status !== 'PAID' &&
-          invoice.status !== 'CANCELLED',
-      ),
-    [invoices, paymentForm.customerId],
-  );
-
-  const createInvoice = useMutation({
+  const saveInvoice = useMutation({
     mutationFn: async () => {
       const body = {
         customerId: invoiceForm.customerId,
         amount: Number(invoiceForm.amount),
         dueDate: invoiceForm.dueDate || undefined,
-        notes: invoiceForm.notes || undefined,
+        status: invoiceForm.status,
       };
+
+      if (invoiceEditingId) {
+        const res = await api.patch(`/billing/invoices/${invoiceEditingId}`, body);
+        return res.data;
+      }
 
       const res = await api.post('/billing/invoices', body);
       return res.data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['billing-invoices'] });
+      queryClient.invalidateQueries({ queryKey: ['billing-payments'] });
       queryClient.invalidateQueries({ queryKey: ['billing-summary'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
-
-      setInvoiceForm({
-        customerId: '',
-        amount: 0,
-        dueDate: '',
-        notes: '',
-      });
+      setInvoiceEditingId(null);
+      setInvoiceForm(emptyInvoiceForm);
+    },
+    onError: (error: any) => {
+      alert(error?.response?.data?.message || 'Invoice save failed');
     },
   });
 
-  const recordPayment = useMutation({
+  const deleteInvoice = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await api.delete(`/billing/invoices/${id}`);
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['billing-invoices'] });
+      queryClient.invalidateQueries({ queryKey: ['billing-payments'] });
+      queryClient.invalidateQueries({ queryKey: ['billing-summary'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+    },
+    onError: (error: any) => {
+      alert(error?.response?.data?.message || 'Invoice delete failed');
+    },
+  });
+
+  const savePayment = useMutation({
     mutationFn: async () => {
       const body = {
         customerId: paymentForm.customerId,
         invoiceId: paymentForm.invoiceId || undefined,
         amount: Number(paymentForm.amount),
         method: paymentForm.method,
-        referenceNo: paymentForm.referenceNo || undefined,
-        notes: paymentForm.notes || undefined,
+        reference: paymentForm.reference,
+        notes: paymentForm.notes,
       };
+
+      if (paymentEditingId) {
+        const res = await api.patch(`/billing/payments/${paymentEditingId}`, body);
+        return res.data;
+      }
 
       const res = await api.post('/billing/payments', body);
       return res.data;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['billing-payments'] });
       queryClient.invalidateQueries({ queryKey: ['billing-invoices'] });
+      queryClient.invalidateQueries({ queryKey: ['billing-payments'] });
       queryClient.invalidateQueries({ queryKey: ['billing-summary'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+      setPaymentEditingId(null);
+      setPaymentForm(emptyPaymentForm);
+    },
+    onError: (error: any) => {
+      alert(error?.response?.data?.message || 'Payment save failed');
+    },
+  });
 
-      setPaymentForm({
-        customerId: '',
-        invoiceId: '',
-        amount: 0,
-        method: 'CASH',
-        referenceNo: '',
-        notes: '',
-      });
+  const deletePayment = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await api.delete(`/billing/payments/${id}`);
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['billing-invoices'] });
+      queryClient.invalidateQueries({ queryKey: ['billing-payments'] });
+      queryClient.invalidateQueries({ queryKey: ['billing-summary'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+    },
+    onError: (error: any) => {
+      alert(error?.response?.data?.message || 'Payment delete failed');
     },
   });
 
@@ -175,264 +233,363 @@ export default function Billing() {
       return res.data;
     },
     onSuccess: (data) => {
-      alert(`Expiry completed. Expired customers: ${data.expiredCount}`);
+      alert(data?.message || 'Expiry check completed');
       queryClient.invalidateQueries({ queryKey: ['customers'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+      queryClient.invalidateQueries({ queryKey: ['billing-invoices'] });
       queryClient.invalidateQueries({ queryKey: ['billing-summary'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+    },
+    onError: (error: any) => {
+      alert(error?.response?.data?.message || 'Expiry run failed');
     },
   });
 
+  const startInvoiceEdit = (invoice: InvoiceItem) => {
+    setInvoiceEditingId(invoice.id);
+    setInvoiceForm({
+      customerId: invoice.customerId,
+      amount: Number(invoice.amount || 0),
+      dueDate: invoice.dueDate ? invoice.dueDate.slice(0, 10) : '',
+      status: invoice.status || 'PENDING',
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const startPaymentEdit = (payment: PaymentItem) => {
+    setPaymentEditingId(payment.id);
+    setPaymentForm({
+      customerId: payment.customerId,
+      invoiceId: payment.invoiceId || '',
+      amount: Number(payment.amount || 0),
+      method: payment.method || 'CASH',
+      reference: payment.reference || '',
+      notes: payment.notes || '',
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const cancelInvoiceEdit = () => {
+    setInvoiceEditingId(null);
+    setInvoiceForm(emptyInvoiceForm);
+  };
+
+  const cancelPaymentEdit = () => {
+    setPaymentEditingId(null);
+    setPaymentForm(emptyPaymentForm);
+  };
+
   const submitInvoice = (event: FormEvent) => {
     event.preventDefault();
-    createInvoice.mutate();
+    saveInvoice.mutate();
   };
 
   const submitPayment = (event: FormEvent) => {
     event.preventDefault();
-    recordPayment.mutate();
+    savePayment.mutate();
   };
 
   return (
     <div className="page">
       <section className="hero-panel">
         <div>
-          <p className="eyebrow">Finance Engine</p>
-          <h1>Billing Control</h1>
+          <p className="eyebrow">Revenue Desk</p>
+          <h1>Billing & Payments</h1>
           <p>
-            Create invoices, record payments, monitor outstanding balance and run automatic expiry.
+            Create invoices, record payments, edit billing entries and manage customer
+            balances.
           </p>
         </div>
 
         <div className="hero-signal">
-          <Banknote size={44} />
+          <CreditCard size={44} />
           <span>BILL</span>
         </div>
       </section>
 
       <section className="stats-grid">
-        <BillingCard
-          title="Today Collection"
-          value={money(summary?.todayCollection)}
-          sub="received today"
-          icon={Banknote}
-        />
+        <div className="stat-card">
+          <div className="stat-icon">
+            <FileText size={23} />
+          </div>
+          <div>
+            <p>Pending Invoices</p>
+            <h3>{summary?.pendingInvoices || 0}</h3>
+            <span>awaiting payment</span>
+          </div>
+        </div>
 
-        <BillingCard
-          title="Monthly Collection"
-          value={money(summary?.monthlyCollection)}
-          sub="current month"
-          icon={CreditCard}
-        />
+        <div className="stat-card">
+          <div className="stat-icon">
+            <ReceiptText size={23} />
+          </div>
+          <div>
+            <p>Monthly Collection</p>
+            <h3>{money(summary?.monthlyCollection || summary?.totalPaid || 0)}</h3>
+            <span>received amount</span>
+          </div>
+        </div>
 
-        <BillingCard
-          title="Outstanding"
-          value={money(summary?.outstanding)}
-          sub="pending balance"
-          icon={Receipt}
-        />
+        <div className="stat-card">
+          <div className="stat-icon">
+            <CreditCard size={23} />
+          </div>
+          <div>
+            <p>Outstanding</p>
+            <h3>{money(summary?.outstanding || summary?.totalOutstanding || 0)}</h3>
+            <span>customer balance</span>
+          </div>
+        </div>
       </section>
 
       <section className="two-grid">
-        <form className="glass-panel form-panel" onSubmit={submitInvoice}>
-          <h2>Create Invoice</h2>
+        <div className="glass-panel form-panel">
+          <div className="panel-header">
+            <div>
+              <h2>{invoiceEditingId ? 'Edit Invoice' : 'Create Invoice'}</h2>
+              <p className="muted">
+                Select customer, amount and due date.
+              </p>
+            </div>
 
-          <div className="form-grid">
-            <label>
-              Customer
-              <select
-                value={invoiceForm.customerId}
-                onChange={(e) => {
-                  const customer = customers.find((item) => item.id === e.target.value);
-
-                  setInvoiceForm({
-                    ...invoiceForm,
-                    customerId: e.target.value,
-                    amount: customer?.package?.price || 0,
-                  });
-                }}
-                required
-              >
-                <option value="">Select customer</option>
-                {customers.map((customer) => (
-                  <option key={customer.id} value={customer.id}>
-                    {customer.customerNo} - {customer.fullName}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              Amount
-              <input
-                type="number"
-                value={invoiceForm.amount}
-                onChange={(e) =>
-                  setInvoiceForm({ ...invoiceForm, amount: Number(e.target.value) })
-                }
-                required
-              />
-            </label>
-
-            <label>
-              Due Date
-              <input
-                type="date"
-                value={invoiceForm.dueDate}
-                onChange={(e) =>
-                  setInvoiceForm({ ...invoiceForm, dueDate: e.target.value })
-                }
-              />
-            </label>
-
-            <label>
-              Notes
-              <input
-                value={invoiceForm.notes}
-                onChange={(e) =>
-                  setInvoiceForm({ ...invoiceForm, notes: e.target.value })
-                }
-                placeholder="Monthly bill"
-              />
-            </label>
+            {invoiceEditingId && (
+              <button className="ghost-btn danger-btn" onClick={cancelInvoiceEdit}>
+                <X size={16} />
+                Cancel
+              </button>
+            )}
           </div>
 
-          <p className="muted">
-            Package: {selectedCustomer?.package?.name || '-'} | Price:{' '}
-            {money(selectedCustomer?.package?.price)}
-          </p>
+          <form onSubmit={submitInvoice}>
+            <div className="form-grid">
+              <label>
+                Customer
+                <select
+                  value={invoiceForm.customerId}
+                  onChange={(e) => {
+                    const customer = customers.find((item) => item.id === e.target.value);
+                    setInvoiceForm({
+                      ...invoiceForm,
+                      customerId: e.target.value,
+                      amount: customer?.package?.price || invoiceForm.amount,
+                    });
+                  }}
+                  disabled={!!invoiceEditingId}
+                  required
+                >
+                  <option value="">Select customer</option>
+                  {customers.map((customer) => (
+                    <option key={customer.id} value={customer.id}>
+                      {customer.fullName} - {customer.customerNo}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
-          <button className="primary-btn small-btn" disabled={createInvoice.isPending}>
-            <FileText size={18} />
-            {createInvoice.isPending ? 'Creating...' : 'Create Invoice'}
-          </button>
-        </form>
+              <label>
+                Amount
+                <input
+                  type="number"
+                  value={invoiceForm.amount}
+                  onChange={(e) =>
+                    setInvoiceForm({
+                      ...invoiceForm,
+                      amount: Number(e.target.value),
+                    })
+                  }
+                  required
+                />
+              </label>
 
-        <form className="glass-panel form-panel" onSubmit={submitPayment}>
-          <h2>Record Payment</h2>
+              <label>
+                Due Date
+                <input
+                  type="date"
+                  value={invoiceForm.dueDate}
+                  onChange={(e) =>
+                    setInvoiceForm({ ...invoiceForm, dueDate: e.target.value })
+                  }
+                  required
+                />
+              </label>
 
-          <div className="form-grid">
-            <label>
-              Customer
-              <select
-                value={paymentForm.customerId}
-                onChange={(e) =>
-                  setPaymentForm({
-                    ...paymentForm,
-                    customerId: e.target.value,
-                    invoiceId: '',
-                  })
-                }
-                required
-              >
-                <option value="">Select customer</option>
-                {customers.map((customer) => (
-                  <option key={customer.id} value={customer.id}>
-                    {customer.customerNo} - {customer.fullName}
-                  </option>
-                ))}
-              </select>
-            </label>
+              {invoiceEditingId && (
+                <label>
+                  Status
+                  <select
+                    value={invoiceForm.status}
+                    onChange={(e) =>
+                      setInvoiceForm({ ...invoiceForm, status: e.target.value })
+                    }
+                  >
+                    <option value="DRAFT">Draft</option>
+                    <option value="PENDING">Pending</option>
+                    <option value="PARTIAL">Partial</option>
+                    <option value="PAID">Paid</option>
+                    <option value="OVERDUE">Overdue</option>
+                    <option value="CANCELLED">Cancelled</option>
+                  </select>
+                </label>
+              )}
+            </div>
 
-            <label>
-              Invoice
-              <select
-                value={paymentForm.invoiceId}
-                onChange={(e) =>
-                  setPaymentForm({ ...paymentForm, invoiceId: e.target.value })
-                }
-              >
-                <option value="">No invoice selected</option>
-                {customerInvoices.map((invoice) => (
-                  <option key={invoice.id} value={invoice.id}>
-                    {invoice.invoiceNo || invoice.id.slice(0, 8)} - {money(invoice.amount)}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <button className="primary-btn small-btn" disabled={saveInvoice.isPending}>
+              {invoiceEditingId ? <Save size={18} /> : <Plus size={18} />}
+              {saveInvoice.isPending
+                ? 'Saving...'
+                : invoiceEditingId
+                  ? 'Update Invoice'
+                  : 'Create Invoice'}
+            </button>
+          </form>
+        </div>
 
-            <label>
-              Amount
-              <input
-                type="number"
-                value={paymentForm.amount}
-                onChange={(e) =>
-                  setPaymentForm({ ...paymentForm, amount: Number(e.target.value) })
-                }
-                required
-              />
-            </label>
+        <div className="glass-panel form-panel">
+          <div className="panel-header">
+            <div>
+              <h2>{paymentEditingId ? 'Edit Payment' : 'Record Payment'}</h2>
+              <p className="muted">
+                Record cash, JazzCash, Easypaisa, bank or card payments.
+              </p>
+            </div>
 
-            <label>
-              Method
-              <select
-                value={paymentForm.method}
-                onChange={(e) =>
-                  setPaymentForm({ ...paymentForm, method: e.target.value })
-                }
-                required
-              >
-                <option value="CASH">Cash</option>
-                <option value="BANK_TRANSFER">Bank Transfer</option>
-                <option value="EASYPAISA">EasyPaisa</option>
-                <option value="JAZZCASH">JazzCash</option>
-                <option value="CARD">Card</option>
-                <option value="OTHER">Other</option>
-              </select>
-            </label>
-
-            <label>
-              Reference No
-              <input
-                value={paymentForm.referenceNo}
-                onChange={(e) =>
-                  setPaymentForm({ ...paymentForm, referenceNo: e.target.value })
-                }
-                placeholder="Optional"
-              />
-            </label>
-
-            <label>
-              Notes
-              <input
-                value={paymentForm.notes}
-                onChange={(e) =>
-                  setPaymentForm({ ...paymentForm, notes: e.target.value })
-                }
-                placeholder="Payment note"
-              />
-            </label>
+            {paymentEditingId && (
+              <button className="ghost-btn danger-btn" onClick={cancelPaymentEdit}>
+                <X size={16} />
+                Cancel
+              </button>
+            )}
           </div>
 
-          <p className="muted">
-            Selected: {selectedPaymentCustomer?.fullName || '-'}
-          </p>
+          <form onSubmit={submitPayment}>
+            <div className="form-grid">
+              <label>
+                Invoice
+                <select
+                  value={paymentForm.invoiceId}
+                  disabled={!!paymentEditingId}
+                  onChange={(e) => {
+                    const invoice = invoices.find((item) => item.id === e.target.value);
 
-          <button className="primary-btn small-btn" disabled={recordPayment.isPending}>
-            <CreditCard size={18} />
-            {recordPayment.isPending ? 'Saving...' : 'Record Payment'}
-          </button>
-        </form>
+                    setPaymentForm({
+                      ...paymentForm,
+                      invoiceId: e.target.value,
+                      customerId: invoice?.customerId || paymentForm.customerId,
+                      amount: Number(invoice?.balance || invoice?.amount || paymentForm.amount),
+                    });
+                  }}
+                >
+                  <option value="">Direct payment / no invoice</option>
+                  {invoices.map((invoice) => (
+                    <option key={invoice.id} value={invoice.id}>
+                      {invoice.invoiceNo} - {invoice.customer?.fullName || '-'} - Balance{' '}
+                      {money(invoice.balance)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label>
+                Customer
+                <select
+                  value={paymentForm.customerId}
+                  disabled={!!paymentEditingId || !!paymentForm.invoiceId}
+                  onChange={(e) =>
+                    setPaymentForm({ ...paymentForm, customerId: e.target.value })
+                  }
+                  required
+                >
+                  <option value="">Select customer</option>
+                  {customers.map((customer) => (
+                    <option key={customer.id} value={customer.id}>
+                      {customer.fullName} - {customer.customerNo}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label>
+                Amount
+                <input
+                  type="number"
+                  value={paymentForm.amount}
+                  onChange={(e) =>
+                    setPaymentForm({
+                      ...paymentForm,
+                      amount: Number(e.target.value),
+                    })
+                  }
+                  required
+                />
+              </label>
+
+              <label>
+                Method
+                <select
+                  value={paymentForm.method}
+                  onChange={(e) =>
+                    setPaymentForm({ ...paymentForm, method: e.target.value })
+                  }
+                >
+                  <option value="CASH">Cash</option>
+                  <option value="JAZZCASH">JazzCash</option>
+                  <option value="EASYPAISA">Easypaisa</option>
+                  <option value="BANK">Bank</option>
+                  <option value="CARD">Card</option>
+                  <option value="OTHER">Other</option>
+                </select>
+              </label>
+
+              <label>
+                Reference
+                <input
+                  value={paymentForm.reference}
+                  onChange={(e) =>
+                    setPaymentForm({ ...paymentForm, reference: e.target.value })
+                  }
+                  placeholder="Transaction/reference no"
+                />
+              </label>
+
+              <label>
+                Notes
+                <input
+                  value={paymentForm.notes}
+                  onChange={(e) =>
+                    setPaymentForm({ ...paymentForm, notes: e.target.value })
+                  }
+                  placeholder="Payment note"
+                />
+              </label>
+            </div>
+
+            <button className="primary-btn small-btn" disabled={savePayment.isPending}>
+              {paymentEditingId ? <Save size={18} /> : <Plus size={18} />}
+              {savePayment.isPending
+                ? 'Saving...'
+                : paymentEditingId
+                  ? 'Update Payment'
+                  : 'Record Payment'}
+            </button>
+          </form>
+        </div>
       </section>
 
       <section className="glass-panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Automation</p>
-            <h2>Auto Expiry</h2>
-            <p className="muted">
-              Run expiry manually. Expired customers will be marked expired and PPP will be disabled.
-            </p>
+            <h2>Invoices</h2>
+            <p className="muted">Edit or delete invoices from here.</p>
           </div>
 
-          <button className="primary-btn small-btn" onClick={() => runExpiry.mutate()}>
-            <PlayCircle size={18} />
+          <button
+            className="ghost-btn"
+            onClick={() => runExpiry.mutate()}
+            disabled={runExpiry.isPending}
+          >
+            <Zap size={15} />
             {runExpiry.isPending ? 'Running...' : 'Run Expiry'}
           </button>
         </div>
-      </section>
-
-      <section className="glass-panel">
-        <h2>Invoices</h2>
 
         {invoicesLoading ? (
           <p className="muted">Loading invoices...</p>
@@ -448,42 +605,73 @@ export default function Billing() {
                   <th>Balance</th>
                   <th>Due Date</th>
                   <th>Status</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
 
               <tbody>
                 {invoices.map((invoice) => (
                   <tr key={invoice.id}>
-                    <td>{invoice.invoiceNo || invoice.id.slice(0, 8)}</td>
-                    <td>{invoice.customer?.fullName || '-'}</td>
+                    <td>
+                      <strong>{invoice.invoiceNo}</strong>
+                      <small className="table-sub">
+                        {new Date(invoice.issueDate).toLocaleDateString()}
+                      </small>
+                    </td>
+
+                    <td>
+                      {invoice.customer?.fullName || '-'}
+                      <small className="table-sub">
+                        {invoice.customer?.customerNo || '-'}
+                      </small>
+                    </td>
+
                     <td>{money(invoice.amount)}</td>
                     <td>{money(invoice.paidAmount)}</td>
                     <td>{money(invoice.balance)}</td>
+
+                    <td>{new Date(invoice.dueDate).toLocaleDateString()}</td>
+
                     <td>
-                      {invoice.dueDate
-                        ? new Date(invoice.dueDate).toLocaleDateString()
-                        : '-'}
-                    </td>
-                    <td>
-                      <span
-                        className={
-                          invoice.status === 'PAID'
-                            ? 'badge green'
-                            : invoice.status === 'PARTIALLY_PAID'
-                              ? 'badge orange'
-                              : 'badge red'
-                        }
-                      >
+                      <span className={badgeClass(invoice.status)}>
                         {invoice.status}
                       </span>
+                    </td>
+
+                    <td>
+                      <div className="action-row">
+                        <button
+                          className="ghost-btn"
+                          onClick={() => startInvoiceEdit(invoice)}
+                        >
+                          <Edit3 size={15} />
+                          Edit
+                        </button>
+
+                        <button
+                          className="ghost-btn danger-btn"
+                          onClick={() => {
+                            if (
+                              confirm(
+                                'Delete this invoice? Linked payments may also be affected.',
+                              )
+                            ) {
+                              deleteInvoice.mutate(invoice.id);
+                            }
+                          }}
+                        >
+                          <Trash2 size={15} />
+                          Delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
 
                 {invoices.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="empty-cell">
-                      No invoices created yet.
+                    <td colSpan={8} className="empty-cell">
+                      No invoices yet.
                     </td>
                   </tr>
                 )}
@@ -505,32 +693,60 @@ export default function Billing() {
                 <tr>
                   <th>Date</th>
                   <th>Customer</th>
+                  <th>Invoice</th>
                   <th>Amount</th>
                   <th>Method</th>
                   <th>Reference</th>
-                  <th>Notes</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
 
               <tbody>
                 {payments.map((payment) => (
                   <tr key={payment.id}>
+                    <td>{new Date(payment.createdAt).toLocaleDateString()}</td>
+
                     <td>
-                      {payment.paidAt
-                        ? new Date(payment.paidAt).toLocaleDateString()
-                        : new Date(payment.createdAt).toLocaleDateString()}
+                      {payment.customer?.fullName || '-'}
+                      <small className="table-sub">
+                        {payment.customer?.customerNo || '-'}
+                      </small>
                     </td>
-                    <td>{payment.customer?.fullName || '-'}</td>
+
+                    <td>{payment.invoice?.invoiceNo || '-'}</td>
                     <td>{money(payment.amount)}</td>
                     <td>{payment.method}</td>
-                    <td>{payment.referenceNo || '-'}</td>
-                    <td>{payment.notes || '-'}</td>
+                    <td>{payment.reference || '-'}</td>
+
+                    <td>
+                      <div className="action-row">
+                        <button
+                          className="ghost-btn"
+                          onClick={() => startPaymentEdit(payment)}
+                        >
+                          <Edit3 size={15} />
+                          Edit
+                        </button>
+
+                        <button
+                          className="ghost-btn danger-btn"
+                          onClick={() => {
+                            if (confirm('Delete this payment? Invoice balance will recalculate.')) {
+                              deletePayment.mutate(payment.id);
+                            }
+                          }}
+                        >
+                          <Trash2 size={15} />
+                          Delete
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
 
                 {payments.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="empty-cell">
+                    <td colSpan={7} className="empty-cell">
                       No payments recorded yet.
                     </td>
                   </tr>

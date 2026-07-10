@@ -1,50 +1,69 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
+import { CurrentUser } from '../auth/current-user.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { BillingService } from './billing.service';
-import { BillingAutomationService } from './billing-automation.service';
-import { CreateInvoiceDto } from './dto/create-invoice.dto';
-import { CreatePaymentDto } from './dto/create-payment.dto';
 
 @UseGuards(JwtAuthGuard)
 @Controller('billing')
 export class BillingController {
-  constructor(
-    private readonly billingService: BillingService,
-    private readonly billingAutomationService: BillingAutomationService,
-  ) {}
+  constructor(private readonly billingService: BillingService) {}
 
-  @Post('invoices')
-  createInvoice(@Body() dto: CreateInvoiceDto) {
-    return this.billingService.createInvoice(dto);
+  @Get('summary')
+  summary(@CurrentUser() user: any) {
+    return this.billingService.summary(user);
   }
 
   @Get('invoices')
-  findInvoices() {
-    return this.billingService.findInvoices();
+  invoices(@CurrentUser() user: any) {
+    return this.billingService.findInvoices(user);
   }
 
-  @Get('invoices/:id')
-  findInvoice(@Param('id') id: string) {
-    return this.billingService.findInvoice(id);
+  @Post('invoices')
+  createInvoice(@CurrentUser() user: any, @Body() dto: any) {
+    return this.billingService.createInvoice(user, dto);
   }
 
-  @Post('payments')
-  recordPayment(@Body() dto: CreatePaymentDto) {
-    return this.billingService.recordPayment(dto);
+  @Patch('invoices/:id')
+  updateInvoice(@CurrentUser() user: any, @Param('id') id: string, @Body() dto: any) {
+    return this.billingService.updateInvoice(user, id, dto);
+  }
+
+  @Delete('invoices/:id')
+  deleteInvoice(@CurrentUser() user: any, @Param('id') id: string) {
+    return this.billingService.deleteInvoice(user, id);
   }
 
   @Get('payments')
-  findPayments() {
-    return this.billingService.findPayments();
+  payments(@CurrentUser() user: any) {
+    return this.billingService.findPayments(user);
   }
 
-  @Get('summary')
-  summary() {
-    return this.billingService.summary();
+  @Post('payments')
+  createPayment(@CurrentUser() user: any, @Body() dto: any) {
+    return this.billingService.createPayment(user, dto);
+  }
+
+  @Patch('payments/:id')
+  updatePayment(@CurrentUser() user: any, @Param('id') id: string, @Body() dto: any) {
+    return this.billingService.updatePayment(user, id, dto);
+  }
+
+  @Delete('payments/:id')
+  deletePayment(@CurrentUser() user: any, @Param('id') id: string) {
+    return this.billingService.deletePayment(user, id);
   }
 
   @Post('run-expiry')
-  runExpiryNow() {
-    return this.billingAutomationService.expireDueCustomers();
+  runExpiry(@CurrentUser() user: any) {
+    return this.billingService.runExpiry(user);
   }
 }

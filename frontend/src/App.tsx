@@ -7,6 +7,7 @@ import Packages from './pages/Packages';
 import Customers from './pages/Customers';
 import Billing from './pages/Billing';
 import Olt from './pages/Olt';
+import Tenants from './pages/Tenants';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = localStorage.getItem('sn_token');
@@ -27,6 +28,7 @@ export default function App() {
         }
       >
         <Route index element={<Dashboard />} />
+        <Route path="/tenants" element={<Tenants />} />
         <Route path="routers" element={<Routers />} />
         <Route path="packages" element={<Packages />} />
         <Route path="customers" element={<Customers />} />

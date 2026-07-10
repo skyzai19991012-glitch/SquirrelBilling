@@ -1,51 +1,80 @@
-import { MikrotikService } from '../mikrotik/mikrotik.service';
 import {
-  ConflictException,
+  BadRequestException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { CustomerStatus } from '@prisma/client';
+import {
+  isSuperAdmin,
+  tenantFilter,
+  tenantIdForCreate,
+} from '../common/tenant-scope';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateCustomerDto } from './dto/create-customer.dto';
-import { UpdateCustomerDto } from './dto/update-customer.dto';
 
 @Injectable()
 export class CustomersService {
-  constructor(
-  private readonly prisma: PrismaService,
-  private readonly mikrotikService: MikrotikService,
-) {}
-  async create(dto: CreateCustomerDto) {
-    const router = await this.prisma.router.findUnique({
-      where: { id: dto.routerId },
+  constructor(private readonly prisma: PrismaService) {}
+
+  private async checkCustomerLimit(user: any) {
+    if (isSuperAdmin(user)) return;
+
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: user.tenantId },
     });
 
-    if (!router) {
-      throw new NotFoundException('Router not found');
-    }
+    if (!tenant) return;
 
-    const pkg = await this.prisma.internetPackage.findUnique({
-      where: { id: dto.packageId },
+    const count = await this.prisma.customer.count({
+      where: { tenantId: user.tenantId },
     });
 
-    if (!pkg) {
-      throw new NotFoundException('Package not found');
+    if (count >= tenant.maxCustomers) {
+      throw new BadRequestException(`Customer limit reached for plan ${tenant.planName}`);
     }
+  }
 
-    const existingCustomer = await this.prisma.customer.findFirst({
+  async create(user: any, dto: any) {
+    await this.checkCustomerLimit(user);
+
+    const tenantId = tenantIdForCreate(user, dto.tenantId);
+
+    const router = await this.prisma.router.findFirst({
       where: {
-        OR: [
-          { customerNo: dto.customerNo },
-          { pppAccount: { username: dto.username } },
-        ],
+        id: dto.routerId,
+        ...(tenantId ? { tenantId } : {}),
       },
     });
 
-    if (existingCustomer) {
-      throw new ConflictException('Customer number or PPP username already exists');
+    if (!router) {
+      throw new BadRequestException('Router not found for this tenant');
     }
+
+    const internetPackage = await this.prisma.internetPackage.findFirst({
+      where: {
+        id: dto.packageId,
+        ...(tenantId ? { tenantId } : {}),
+      },
+    });
+
+    if (!internetPackage) {
+      throw new BadRequestException('Package not found for this tenant');
+    }
+
+    const pppUsername =
+      dto.pppUsername || dto.username || dto.pppAccount?.username || null;
+
+    const pppPassword =
+      dto.pppPassword || dto.pppPasswordText || dto.pppAccount?.password || '123456';
+
+    const pppProfile =
+      dto.pppProfile ||
+      dto.profile ||
+      dto.pppAccount?.profile ||
+      internetPackage.mikrotikProfile;
 
     return this.prisma.customer.create({
       data: {
+        tenantId,
         customerNo: dto.customerNo,
         fullName: dto.fullName,
         fatherName: dto.fatherName,
@@ -57,20 +86,25 @@ export class CustomersService {
         gpsLocation: dto.gpsLocation,
         routerId: dto.routerId,
         packageId: dto.packageId,
-        dueDate: dto.dueDate ? new Date(dto.dueDate) : null,
+        dueDate: dto.dueDate ? new Date(dto.dueDate) : undefined,
         notes: dto.notes,
-        pppAccount: {
-          create: {
-            routerId: dto.routerId,
-            username: dto.username,
-            password: dto.password,
-            profile: dto.profile,
-            service: dto.service || 'pppoe',
-            localIp: dto.localIp,
-            remoteIp: dto.remoteIp,
-            callerId: dto.callerId,
-          },
-        },
+        status: dto.status || CustomerStatus.ACTIVE,
+        pppAccount: pppUsername
+          ? {
+              create: {
+                tenantId,
+                routerId: dto.routerId,
+                username: pppUsername,
+                password: pppPassword,
+                profile: pppProfile,
+                service: dto.service || 'pppoe',
+                localIp: dto.localIp,
+                remoteIp: dto.remoteIp,
+                callerId: dto.callerId,
+                disabled: false,
+              },
+            }
+          : undefined,
       },
       include: {
         router: true,
@@ -80,26 +114,24 @@ export class CustomersService {
     });
   }
 
-  findAll() {
+  async findAll(user: any) {
     return this.prisma.customer.findMany({
+      where: tenantFilter(user),
       orderBy: { createdAt: 'desc' },
       include: {
-        router: {
-          select: {
-            id: true,
-            name: true,
-            host: true,
-          },
-        },
+        router: true,
         package: true,
         pppAccount: true,
       },
     });
   }
 
-  async findOne(id: string) {
-    const customer = await this.prisma.customer.findUnique({
-      where: { id },
+  async findOne(user: any, id: string) {
+    const customer = await this.prisma.customer.findFirst({
+      where: {
+        id,
+        ...tenantFilter(user),
+      },
       include: {
         router: true,
         package: true,
@@ -116,65 +148,26 @@ export class CustomersService {
     return customer;
   }
 
-  async update(id: string, dto: UpdateCustomerDto) {
-    await this.findOne(id);
-
-    const customerData: any = {};
-    const pppData: any = {};
-
-    const customerFields = [
-      'fullName',
-      'fatherName',
-      'cnic',
-      'phone',
-      'whatsapp',
-      'email',
-      'address',
-      'gpsLocation',
-      'routerId',
-      'packageId',
-      'notes',
-    ];
-
-    for (const field of customerFields) {
-      if (dto[field] !== undefined) {
-        customerData[field] = dto[field];
-      }
-    }
-
-    if (dto.dueDate !== undefined) {
-      customerData.dueDate = dto.dueDate ? new Date(dto.dueDate) : null;
-    }
-
-    const pppFields = [
-      'username',
-      'password',
-      'profile',
-      'localIp',
-      'remoteIp',
-      'callerId',
-    ];
-
-    for (const field of pppFields) {
-      if (dto[field] !== undefined) {
-        pppData[field] = dto[field];
-      }
-    }
-
-    if (dto.routerId !== undefined) {
-      pppData.routerId = dto.routerId;
-    }
+  async update(user: any, id: string, dto: any) {
+    await this.findOne(user, id);
 
     return this.prisma.customer.update({
       where: { id },
       data: {
-        ...customerData,
-        pppAccount:
-          Object.keys(pppData).length > 0
-            ? {
-                update: pppData,
-              }
-            : undefined,
+        customerNo: dto.customerNo,
+        fullName: dto.fullName,
+        fatherName: dto.fatherName,
+        cnic: dto.cnic,
+        phone: dto.phone,
+        whatsapp: dto.whatsapp,
+        email: dto.email,
+        address: dto.address,
+        gpsLocation: dto.gpsLocation,
+        routerId: dto.routerId,
+        packageId: dto.packageId,
+        dueDate: dto.dueDate ? new Date(dto.dueDate) : undefined,
+        notes: dto.notes,
+        status: dto.status,
       },
       include: {
         router: true,
@@ -184,92 +177,88 @@ export class CustomersService {
     });
   }
 
-   async suspend(id: string) {
-    const customer = await this.findOne(id);
+  async remove(user: any, id: string) {
+    await this.findOne(user, id);
 
-    const updated = await this.prisma.customer.update({
-      where: { id },
-      data: {
-        status: 'SUSPENDED',
-        pppAccount: {
-          update: {
-            disabled: true,
-          },
+    await this.prisma.$transaction([
+      this.prisma.payment.deleteMany({
+        where: {
+          customerId: id,
+          ...tenantFilter(user),
         },
-      },
-      include: {
-        pppAccount: true,
-      },
-    });
-
-    let routerSync: any = null;
-
-    if (customer.pppAccount) {
-      routerSync = await this.mikrotikService
-        .disablePppSecret(customer.routerId, customer.pppAccount.username)
-        .catch((error) => ({
-          success: false,
-          message: error.message,
-        }));
-    }
+      }),
+      this.prisma.invoice.deleteMany({
+        where: {
+          customerId: id,
+          ...tenantFilter(user),
+        },
+      }),
+      this.prisma.pppAccount.deleteMany({
+        where: {
+          customerId: id,
+          ...tenantFilter(user),
+        },
+      }),
+      this.prisma.customer.delete({
+        where: { id },
+      }),
+    ]);
 
     return {
       success: true,
-      customer: updated,
-      routerSync,
+      message: 'Customer deleted',
     };
   }
 
-    async activate(id: string) {
-    const customer = await this.findOne(id);
+  async suspend(user: any, id: string) {
+    await this.findOne(user, id);
 
-    const updated = await this.prisma.customer.update({
+    await this.prisma.pppAccount.updateMany({
+      where: {
+        customerId: id,
+        ...tenantFilter(user),
+      },
+      data: {
+        disabled: true,
+      },
+    });
+
+    return this.prisma.customer.update({
       where: { id },
       data: {
-        status: 'ACTIVE',
-        pppAccount: {
-          update: {
-            disabled: false,
-          },
-        },
+        status: CustomerStatus.SUSPENDED,
       },
       include: {
+        router: true,
+        package: true,
         pppAccount: true,
       },
     });
-
-    let routerSync: any = null;
-
-    if (customer.pppAccount) {
-      routerSync = await this.mikrotikService
-        .enablePppSecret(customer.routerId, customer.pppAccount.username)
-        .catch((error) => ({
-          success: false,
-          message: error.message,
-        }));
-    }
-
-    return {
-      success: true,
-      customer: updated,
-      routerSync,
-    };
   }
 
-  async remove(id: string) {
-    await this.findOne(id);
+  async activate(user: any, id: string) {
+    await this.findOne(user, id);
 
-    await this.prisma.pppAccount.deleteMany({
-      where: { customerId: id },
+    await this.prisma.pppAccount.updateMany({
+      where: {
+        customerId: id,
+        ...tenantFilter(user),
+      },
+      data: {
+        disabled: false,
+      },
     });
 
-    await this.prisma.customer.delete({
+    return this.prisma.customer.update({
       where: { id },
+      data: {
+        status: CustomerStatus.ACTIVE,
+      },
+      include: {
+        router: true,
+        package: true,
+        pppAccount: true,
+      },
     });
-
-    return {
-      success: true,
-      message: 'Customer deleted successfully',
-    };
   }
 }

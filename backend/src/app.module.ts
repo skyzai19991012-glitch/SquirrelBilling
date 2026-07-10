@@ -1,3 +1,4 @@
+import { TenantsModule } from './tenants/tenants.module';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaModule } from './prisma/prisma.module';
@@ -11,6 +12,7 @@ import { CustomersModule } from './customers/customers.module';
 import { BillingModule } from './billing/billing.module';
 import { OltModule } from './olt/olt.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+
 
 @Module({
   imports: [
@@ -27,6 +29,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
     BillingModule,
     OltModule,
     DashboardModule,
+    TenantsModule,
   ],
   controllers: [AppController],
 })

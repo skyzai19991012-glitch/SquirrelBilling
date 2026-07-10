@@ -1,25 +1,77 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+﻿import { useState } from 'react';
+import type { FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { PauseCircle, PlayCircle, UserPlus, Users } from 'lucide-react';
+import { Edit3, Plus, Save, Trash2, UserPlus, X } from 'lucide-react';
 import { api } from '../api/client';
-import type { CustomerItem, InternetPackage, RouterItem } from '../types';
+
+type RouterItem = {
+  id: string;
+  name: string;
+};
+
+type PackageItem = {
+  id: string;
+  name: string;
+  price: number;
+  mikrotikProfile?: string;
+};
+
+type CustomerItem = {
+  id: string;
+  customerNo: string;
+  fullName: string;
+  fatherName?: string | null;
+  cnic?: string | null;
+  phone: string;
+  whatsapp?: string | null;
+  email?: string | null;
+  address?: string | null;
+  gpsLocation?: string | null;
+  status: 'ACTIVE' | 'SUSPENDED' | 'EXPIRED' | 'TERMINATED';
+  routerId: string;
+  packageId: string;
+  dueDate?: string | null;
+  router?: RouterItem;
+  package?: PackageItem;
+  pppAccount?: {
+    id: string;
+    username: string;
+    password?: string;
+    profile: string;
+    disabled: boolean;
+  } | null;
+};
+
+const emptyForm = {
+  customerNo: '',
+  fullName: '',
+  fatherName: '',
+  cnic: '',
+  phone: '',
+  whatsapp: '',
+  email: '',
+  address: '',
+  gpsLocation: '',
+  routerId: '',
+  packageId: '',
+  pppUsername: '',
+  pppPassword: '',
+  mikrotikProfile: '',
+  dueDate: '',
+  notes: '',
+};
 
 export default function Customers() {
   const queryClient = useQueryClient();
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState(emptyForm);
 
-  const [form, setForm] = useState({
-    customerNo: `CUST-${Date.now()}`,
-    fullName: '',
-    phone: '',
-    cnic: '',
-    address: '',
-    routerId: '',
-    packageId: '',
-    username: '',
-    password: '',
-    profile: '',
-    dueDate: '',
-    notes: '',
+  const { data: customers = [], isLoading } = useQuery<CustomerItem[]>({
+    queryKey: ['customers'],
+    queryFn: async () => {
+      const res = await api.get('/customers');
+      return res.data;
+    },
   });
 
   const { data: routers = [] } = useQuery<RouterItem[]>({
@@ -30,7 +82,7 @@ export default function Customers() {
     },
   });
 
-  const { data: packages = [] } = useQuery<InternetPackage[]>({
+  const { data: packages = [] } = useQuery<PackageItem[]>({
     queryKey: ['packages'],
     queryFn: async () => {
       const res = await api.get('/packages');
@@ -38,60 +90,48 @@ export default function Customers() {
     },
   });
 
-  const { data: customers = [], isLoading } = useQuery<CustomerItem[]>({
-    queryKey: ['customers'],
-    queryFn: async () => {
-      const res = await api.get('/customers');
-      return res.data;
-    },
-  });
-
-  const selectedPackage = useMemo(
-    () => packages.find((pkg) => pkg.id === form.packageId),
-    [packages, form.packageId],
-  );
-
-  useEffect(() => {
-    if (selectedPackage) {
-      setForm((current) => ({
-        ...current,
-        profile: selectedPackage.mikrotikProfile,
-      }));
-    }
-  }, [selectedPackage]);
-
-  const createCustomer = useMutation({
+  const saveCustomer = useMutation({
     mutationFn: async () => {
       const body = {
         ...form,
         dueDate: form.dueDate || undefined,
-        cnic: form.cnic || undefined,
-        address: form.address || undefined,
-        notes: form.notes || undefined,
-        service: 'pppoe',
+        mikrotikProfile: form.mikrotikProfile || undefined,
       };
+
+      if (editingId) {
+        const res = await api.patch(`/customers/${editingId}`, body);
+        return res.data;
+      }
 
       const res = await api.post('/customers', body);
       return res.data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['customers'] });
+      queryClient.invalidateQueries({ queryKey: ['routers'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+      setEditingId(null);
+      setForm(emptyForm);
+    },
+    onError: (error: any) => {
+      alert(error?.response?.data?.message || 'Customer save failed');
+    },
+  });
 
-      setForm({
-        customerNo: `CUST-${Date.now()}`,
-        fullName: '',
-        phone: '',
-        cnic: '',
-        address: '',
-        routerId: '',
-        packageId: '',
-        username: '',
-        password: '',
-        profile: '',
-        dueDate: '',
-        notes: '',
-      });
+  const deleteCustomer = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await api.delete(`/customers/${id}`);
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['customers'] });
+      queryClient.invalidateQueries({ queryKey: ['routers'] });
+      queryClient.invalidateQueries({ queryKey: ['billing-invoices'] });
+      queryClient.invalidateQueries({ queryKey: ['billing-payments'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+    },
+    onError: (error: any) => {
+      alert(error?.response?.data?.message || 'Customer delete failed');
     },
   });
 
@@ -100,9 +140,9 @@ export default function Customers() {
       const res = await api.post(`/customers/${id}/suspend`);
       return res.data;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['customers'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['customers'] }),
+    onError: (error: any) => {
+      alert(error?.response?.data?.message || 'Suspend failed');
     },
   });
 
@@ -111,36 +151,83 @@ export default function Customers() {
       const res = await api.post(`/customers/${id}/activate`);
       return res.data;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['customers'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['customers'] }),
+    onError: (error: any) => {
+      alert(error?.response?.data?.message || 'Activate failed');
     },
   });
 
+  const startEdit = (customer: CustomerItem) => {
+    setEditingId(customer.id);
+
+    setForm({
+      customerNo: customer.customerNo || '',
+      fullName: customer.fullName || '',
+      fatherName: customer.fatherName || '',
+      cnic: customer.cnic || '',
+      phone: customer.phone || '',
+      whatsapp: customer.whatsapp || '',
+      email: customer.email || '',
+      address: customer.address || '',
+      gpsLocation: customer.gpsLocation || '',
+      routerId: customer.routerId || '',
+      packageId: customer.packageId || '',
+      pppUsername: customer.pppAccount?.username || '',
+      pppPassword: '',
+      mikrotikProfile: customer.pppAccount?.profile || customer.package?.mikrotikProfile || '',
+      dueDate: customer.dueDate ? customer.dueDate.slice(0, 10) : '',
+      notes: '',
+    });
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setForm(emptyForm);
+  };
+
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    createCustomer.mutate();
+    saveCustomer.mutate();
   };
+
+  const selectedPackage = packages.find((item) => item.id === form.packageId);
 
   return (
     <div className="page">
       <section className="hero-panel">
         <div>
-          <p className="eyebrow">Subscribers</p>
-          <h1>Customer Management</h1>
+          <p className="eyebrow">Subscriber CRM</p>
+          <h1>Customers</h1>
           <p>
-            Add PPPoE customers, assign packages, set due dates, suspend and activate users.
+            Add, edit, suspend and delete ISP customers. Deleting customer removes linked
+            invoices, payments and PPP account from local database.
           </p>
         </div>
 
         <div className="hero-signal">
-          <Users size={44} />
+          <UserPlus size={44} />
           <span>CRM</span>
         </div>
       </section>
 
       <section className="glass-panel form-panel">
-        <h2>Add Customer</h2>
+        <div className="panel-header">
+          <div>
+            <h2>{editingId ? 'Edit Customer' : 'Add Customer'}</h2>
+            <p className="muted">
+              Add customer with router, package and PPP account details.
+            </p>
+          </div>
+
+          {editingId && (
+            <button type="button" className="ghost-btn danger-btn" onClick={cancelEdit}>
+              <X size={16} />
+              Cancel Edit
+            </button>
+          )}
+        </div>
 
         <form onSubmit={submit}>
           <div className="form-grid">
@@ -149,6 +236,7 @@ export default function Customers() {
               <input
                 value={form.customerNo}
                 onChange={(e) => setForm({ ...form, customerNo: e.target.value })}
+                placeholder="CUST-001"
                 required
               />
             </label>
@@ -158,16 +246,17 @@ export default function Customers() {
               <input
                 value={form.fullName}
                 onChange={(e) => setForm({ ...form, fullName: e.target.value })}
+                placeholder="Customer name"
                 required
               />
             </label>
 
             <label>
-              Phone
+              Father Name
               <input
-                value={form.phone}
-                onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                required
+                value={form.fatherName}
+                onChange={(e) => setForm({ ...form, fatherName: e.target.value })}
+                placeholder="Father name"
               />
             </label>
 
@@ -176,14 +265,44 @@ export default function Customers() {
               <input
                 value={form.cnic}
                 onChange={(e) => setForm({ ...form, cnic: e.target.value })}
+                placeholder="42101-0000000-0"
               />
             </label>
 
             <label>
-              Address
+              Phone
               <input
-                value={form.address}
-                onChange={(e) => setForm({ ...form, address: e.target.value })}
+                value={form.phone}
+                onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                placeholder="03000000000"
+                required
+              />
+            </label>
+
+            <label>
+              WhatsApp
+              <input
+                value={form.whatsapp}
+                onChange={(e) => setForm({ ...form, whatsapp: e.target.value })}
+                placeholder="03000000000"
+              />
+            </label>
+
+            <label>
+              Email
+              <input
+                value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
+                placeholder="customer@email.com"
+              />
+            </label>
+
+            <label>
+              GPS Location
+              <input
+                value={form.gpsLocation}
+                onChange={(e) => setForm({ ...form, gpsLocation: e.target.value })}
+                placeholder="24.8607, 67.0011"
               />
             </label>
 
@@ -197,7 +316,7 @@ export default function Customers() {
                 <option value="">Select router</option>
                 {routers.map((router) => (
                   <option key={router.id} value={router.id}>
-                    {router.name} ({router.host})
+                    {router.name}
                   </option>
                 ))}
               </select>
@@ -207,13 +326,21 @@ export default function Customers() {
               Package
               <select
                 value={form.packageId}
-                onChange={(e) => setForm({ ...form, packageId: e.target.value })}
+                onChange={(e) => {
+                  const pkg = packages.find((item) => item.id === e.target.value);
+
+                  setForm({
+                    ...form,
+                    packageId: e.target.value,
+                    mikrotikProfile: pkg?.mikrotikProfile || pkg?.name || '',
+                  });
+                }}
                 required
               >
                 <option value="">Select package</option>
-                {packages.map((pkg) => (
-                  <option key={pkg.id} value={pkg.id}>
-                    {pkg.name} - Rs. {pkg.price}
+                {packages.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name} - Rs. {Number(item.price || 0).toLocaleString()}
                   </option>
                 ))}
               </select>
@@ -222,27 +349,31 @@ export default function Customers() {
             <label>
               PPP Username
               <input
-                value={form.username}
-                onChange={(e) => setForm({ ...form, username: e.target.value })}
-                required
+                value={form.pppUsername}
+                onChange={(e) => setForm({ ...form, pppUsername: e.target.value })}
+                placeholder="testuser1"
+                required={!editingId}
               />
             </label>
 
             <label>
               PPP Password
               <input
-                value={form.password}
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-                required
+                value={form.pppPassword}
+                onChange={(e) => setForm({ ...form, pppPassword: e.target.value })}
+                placeholder={editingId ? 'Leave blank to keep old password' : '123456'}
+                required={!editingId}
               />
             </label>
 
             <label>
               MikroTik Profile
               <input
-                value={form.profile}
-                onChange={(e) => setForm({ ...form, profile: e.target.value })}
-                required
+                value={form.mikrotikProfile}
+                onChange={(e) =>
+                  setForm({ ...form, mikrotikProfile: e.target.value })
+                }
+                placeholder={selectedPackage?.mikrotikProfile || '20M'}
               />
             </label>
 
@@ -256,17 +387,31 @@ export default function Customers() {
             </label>
 
             <label>
+              Address
+              <textarea
+                value={form.address}
+                onChange={(e) => setForm({ ...form, address: e.target.value })}
+                placeholder="Customer address"
+              />
+            </label>
+
+            <label>
               Notes
-              <input
+              <textarea
                 value={form.notes}
                 onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                placeholder="Any note"
               />
             </label>
           </div>
 
-          <button className="primary-btn small-btn" disabled={createCustomer.isPending}>
-            <UserPlus size={18} />
-            {createCustomer.isPending ? 'Saving...' : 'Add Customer'}
+          <button className="primary-btn small-btn" disabled={saveCustomer.isPending}>
+            {editingId ? <Save size={18} /> : <Plus size={18} />}
+            {saveCustomer.isPending
+              ? 'Saving...'
+              : editingId
+                ? 'Update Customer'
+                : 'Add Customer'}
           </button>
         </form>
       </section>
@@ -281,12 +426,11 @@ export default function Customers() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>No</th>
-                  <th>Name</th>
+                  <th>Customer</th>
                   <th>Phone</th>
-                  <th>PPP User</th>
-                  <th>Package</th>
                   <th>Router</th>
+                  <th>Package</th>
+                  <th>PPP</th>
                   <th>Due Date</th>
                   <th>Status</th>
                   <th>Actions</th>
@@ -296,17 +440,38 @@ export default function Customers() {
               <tbody>
                 {customers.map((customer) => (
                   <tr key={customer.id}>
-                    <td>{customer.customerNo}</td>
-                    <td>{customer.fullName}</td>
-                    <td>{customer.phone}</td>
-                    <td>{customer.pppAccount?.username || '-'}</td>
-                    <td>{customer.package?.name || '-'}</td>
+                    <td>
+                      <strong>{customer.fullName}</strong>
+                      <small className="table-sub">{customer.customerNo}</small>
+                    </td>
+
+                    <td>
+                      {customer.phone}
+                      <small className="table-sub">{customer.whatsapp || '-'}</small>
+                    </td>
+
                     <td>{customer.router?.name || '-'}</td>
+
+                    <td>
+                      {customer.package?.name || '-'}
+                      <small className="table-sub">
+                        Rs. {Number(customer.package?.price || 0).toLocaleString()}
+                      </small>
+                    </td>
+
+                    <td>
+                      {customer.pppAccount?.username || '-'}
+                      <small className="table-sub">
+                        {customer.pppAccount?.profile || '-'}
+                      </small>
+                    </td>
+
                     <td>
                       {customer.dueDate
                         ? new Date(customer.dueDate).toLocaleDateString()
                         : '-'}
                     </td>
+
                     <td>
                       <span
                         className={
@@ -320,22 +485,44 @@ export default function Customers() {
                         {customer.status}
                       </span>
                     </td>
+
                     <td>
                       <div className="action-row">
-                        <button
-                          className="ghost-btn"
-                          onClick={() => suspendCustomer.mutate(customer.id)}
-                        >
-                          <PauseCircle size={16} />
-                          Suspend
+                        <button className="ghost-btn" onClick={() => startEdit(customer)}>
+                          <Edit3 size={15} />
+                          Edit
                         </button>
 
+                        {customer.status === 'ACTIVE' ? (
+                          <button
+                            className="ghost-btn danger-btn"
+                            onClick={() => suspendCustomer.mutate(customer.id)}
+                          >
+                            Suspend
+                          </button>
+                        ) : (
+                          <button
+                            className="ghost-btn"
+                            onClick={() => activateCustomer.mutate(customer.id)}
+                          >
+                            Activate
+                          </button>
+                        )}
+
                         <button
-                          className="ghost-btn"
-                          onClick={() => activateCustomer.mutate(customer.id)}
+                          className="ghost-btn danger-btn"
+                          onClick={() => {
+                            if (
+                              confirm(
+                                'Delete this customer? This will also delete linked invoices, payments and PPP account.',
+                              )
+                            ) {
+                              deleteCustomer.mutate(customer.id);
+                            }
+                          }}
                         >
-                          <PlayCircle size={16} />
-                          Activate
+                          <Trash2 size={15} />
+                          Delete
                         </button>
                       </div>
                     </td>
@@ -344,7 +531,7 @@ export default function Customers() {
 
                 {customers.length === 0 && (
                   <tr>
-                    <td colSpan={9} className="empty-cell">
+                    <td colSpan={8} className="empty-cell">
                       No customers added yet.
                     </td>
                   </tr>

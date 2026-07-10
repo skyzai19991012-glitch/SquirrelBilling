@@ -8,11 +8,19 @@ datasource db {
 }
 
 enum UserRole {
+  SUPER_ADMIN
   ADMIN
   MANAGER
   OPERATOR
   TECHNICIAN
   READONLY
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  EXPIRED
+  CANCELLED
 }
 
 enum CustomerStatus {
@@ -54,19 +62,66 @@ enum OltVendor {
   OTHER
 }
 
-model User {
-  id        String   @id @default(cuid())
-  fullName  String
-  username  String   @unique
-  password  String
-  role      UserRole @default(ADMIN)
-  active    Boolean  @default(true)
+enum DeviceConnectionStatus {
+  NOT_TESTED
+  CONNECTED
+  FAILED
+}
+
+model Tenant {
+  id          String       @id @default(cuid())
+  name        String       @unique
+  companyName String?
+  ownerName   String?
+  email       String?
+  phone       String?
+  address     String?
+  status      TenantStatus @default(ACTIVE)
+
+  planName     String @default("STARTER")
+  monthlyPrice Float  @default(0)
+
+  maxCustomers Int @default(300)
+  maxRouters   Int @default(1)
+  maxOlts      Int @default(1)
+
+  subscriptionStart DateTime  @default(now())
+  subscriptionEnd   DateTime?
+
+  users       User[]
+  routers     Router[]
+  packages    InternetPackage[]
+  customers   Customer[]
+  pppAccounts PppAccount[]
+  invoices    Invoice[]
+  payments    Payment[]
+  olts        OltDevice[]
+  onus        OnuDevice[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
 
+model User {
+  id       String   @id @default(cuid())
+  tenantId String?
+  fullName String
+  username String   @unique
+  password String
+  role     UserRole @default(ADMIN)
+  active   Boolean  @default(true)
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+}
+
 model Router {
   id       String     @id @default(cuid())
+  tenantId String?
   name     String
   type     RouterType @default(MIKROTIK)
   host     String
@@ -76,19 +131,29 @@ model Router {
   ssl      Boolean    @default(true)
   active   Boolean    @default(true)
 
+  connectionStatus DeviceConnectionStatus @default(NOT_TESTED)
+  lastTestedAt     DateTime?
+  lastError        String?
+
   model    String?
   version  String?
   identity String?
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   customers   Customer[]
   pppAccounts PppAccount[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
 }
 
 model InternetPackage {
-  id              String  @id @default(cuid())
+  id       String  @id @default(cuid())
+  tenantId String?
+
   name            String  @unique
   downloadMbps    Int
   uploadMbps      Int
@@ -96,14 +161,18 @@ model InternetPackage {
   mikrotikProfile String
   active          Boolean @default(true)
 
+  tenant    Tenant?    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   customers Customer[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
 }
 
 model Customer {
   id          String  @id @default(cuid())
+  tenantId    String?
   customerNo  String  @unique
   fullName    String
   fatherName  String?
@@ -119,6 +188,7 @@ model Customer {
   routerId  String
   packageId String
 
+  tenant  Tenant?         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   router  Router          @relation(fields: [routerId], references: [id])
   package InternetPackage @relation(fields: [packageId], references: [id])
 
@@ -133,10 +203,15 @@ model Customer {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([routerId])
+  @@index([packageId])
 }
 
 model PppAccount {
-  id String @id @default(cuid())
+  id       String  @id @default(cuid())
+  tenantId String?
 
   customerId String @unique
   routerId   String
@@ -150,17 +225,22 @@ model PppAccount {
   callerId String?
   disabled Boolean @default(false)
 
+  tenant   Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   customer Customer @relation(fields: [customerId], references: [id])
   router   Router   @relation(fields: [routerId], references: [id])
 
   lastSyncAt DateTime?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
+
+  @@index([tenantId])
+  @@index([routerId])
 }
 
 model Invoice {
-  id         String @id @default(cuid())
-  invoiceNo  String @unique
+  id         String  @id @default(cuid())
+  tenantId   String?
+  invoiceNo  String  @unique
   customerId String
 
   amount     Float
@@ -171,15 +251,20 @@ model Invoice {
   issueDate DateTime      @default(now())
   dueDate   DateTime
 
+  tenant   Tenant?   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   customer Customer  @relation(fields: [customerId], references: [id])
   payments Payment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([customerId])
 }
 
 model Payment {
   id         String  @id @default(cuid())
+  tenantId   String?
   customerId String
   invoiceId  String?
 
@@ -188,14 +273,20 @@ model Payment {
   reference String?
   notes     String?
 
+  tenant   Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   customer Customer @relation(fields: [customerId], references: [id])
   invoice  Invoice? @relation(fields: [invoiceId], references: [id])
 
   createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([invoiceId])
 }
 
 model OltDevice {
   id       String    @id @default(cuid())
+  tenantId String?
   name     String
   vendor   OltVendor
   host     String
@@ -204,14 +295,22 @@ model OltDevice {
   password String
   active   Boolean   @default(true)
 
-  onus OnuDevice[]
+  connectionStatus DeviceConnectionStatus @default(NOT_TESTED)
+  lastTestedAt     DateTime?
+  lastError        String?
+
+  tenant Tenant?     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  onus   OnuDevice[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
 }
 
 model OnuDevice {
   id           String  @id @default(cuid())
+  tenantId     String?
   oltId        String
   serialNumber String  @unique
   ponPort      String
@@ -225,8 +324,12 @@ model OnuDevice {
   customerName  String?
   customerPhone String?
 
-  olt OltDevice @relation(fields: [oltId], references: [id])
+  tenant Tenant?   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  olt    OltDevice @relation(fields: [oltId], references: [id])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([oltId])
 }
